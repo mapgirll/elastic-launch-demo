@@ -122,6 +122,8 @@ create_tool() {
     local tool_id="$1"
     local tool_body="$2"
     log_info "Creating/updating tool: ${tool_id}"
+    # Delete first to ensure type changes take effect (PUT can't change type)
+    kb_request DELETE "/api/agent_builder/tools/${tool_id}" > /dev/null 2>&1 || true
     if kb_request POST "/api/agent_builder/tools" "$tool_body" > /dev/null 2>&1; then
         log_ok "Tool ${tool_id} created."
         tool_count=$((tool_count + 1))
@@ -146,16 +148,16 @@ print(json.dumps({k: v for k, v in body.items() if k in ('description', 'configu
 create_tool "search_telemetry_logs" '{
   "id": "search_telemetry_logs",
   "type": "index_search",
-  "description": "Search NOVA-7 telemetry logs for anomaly investigation. Supports filtering by error type, sensor type, vehicle section, service name, severity, channel, and cloud provider. Primary investigation tool for root cause analysis.",
+  "description": "Search NOVA-7 telemetry logs for anomaly investigation. Searches the logs data stream which contains all OTLP telemetry. Supports filtering by error type (in body.text), sensor type, vehicle section, service name, severity, channel, and cloud provider. Primary investigation tool for root cause analysis.",
   "configuration": {
-    "pattern": "logs*"
+    "pattern": "logs"
   }
 }'
 
 create_tool "search_subsystem_health" '{
   "id": "search_subsystem_health",
   "type": "esql",
-  "description": "Query health status of NOVA-7 services by aggregating recent telemetry. Returns error counts, warning counts, and overall health status for each of the 9 services (fuel-system, navigation, comms-array, mission-control, range-safety, ground-systems, payload-monitor, sensor-validator, telemetry-relay).",
+  "description": "Query health status of NOVA-7 services by aggregating recent telemetry. Returns error counts, warning counts, and overall health status for each of the 9 services (fuel-system, navigation, comms-array, mission-control, range-safety, ground-systems, payload-monitor, sensor-validator, telemetry-relay). Log message field: body.text (never use 'body' alone).",
   "configuration": {
     "query": "FROM logs | WHERE @timestamp > NOW() - 15 MINUTES | STATS error_count = COUNT(*) WHERE severity_text == \"ERROR\", warn_count = COUNT(*) WHERE severity_text == \"WARN\", total = COUNT(*) BY service.name | SORT error_count DESC",
     "params": {}
@@ -165,7 +167,7 @@ create_tool "search_subsystem_health" '{
 create_tool "check_service_status" '{
   "id": "check_service_status",
   "type": "esql",
-  "description": "Check operational status of individual NOVA-7 microservices. Returns error counts, warning counts, and log totals for each of the 9 services (fuel-system, navigation, comms-array, mission-control, range-safety, ground-systems, payload-monitor, sensor-validator, telemetry-relay).",
+  "description": "Check operational status of individual NOVA-7 microservices. Returns error counts, warning counts, and log totals for each of the 9 services (fuel-system, navigation, comms-array, mission-control, range-safety, ground-systems, payload-monitor, sensor-validator, telemetry-relay). Log message field: body.text (never use 'body' alone).",
   "configuration": {
     "query": "FROM logs | WHERE @timestamp > NOW() - 15 MINUTES | STATS error_count = COUNT(*) WHERE severity_text == \"ERROR\", warn_count = COUNT(*) WHERE severity_text == \"WARN\", total = COUNT(*) BY service.name | SORT error_count DESC",
     "params": {}
@@ -184,7 +186,7 @@ create_tool "search_known_anomalies" '{
 create_tool "trace_anomaly_propagation" '{
   "id": "trace_anomaly_propagation",
   "type": "esql",
-  "description": "Trace the propagation path of anomalies across NOVA-7 services. Shows which services have errors and warnings over time to identify cascade chains and the temporal order of fault propagation.",
+  "description": "Trace the propagation path of anomalies across NOVA-7 services. Shows which services have errors and warnings over time to identify cascade chains and the temporal order of fault propagation. Log message field: body.text (never use 'body' alone).",
   "configuration": {
     "query": "FROM logs | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text IN (\"ERROR\", \"WARN\") | STATS error_count = COUNT(*) WHERE severity_text == \"ERROR\", warn_count = COUNT(*) WHERE severity_text == \"WARN\" BY service.name | SORT error_count DESC",
     "params": {}
@@ -194,7 +196,7 @@ create_tool "trace_anomaly_propagation" '{
 create_tool "launch_safety_assessment" '{
   "id": "launch_safety_assessment",
   "type": "esql",
-  "description": "Comprehensive launch safety assessment. Evaluates all critical NOVA-7 services against launch commit criteria. Checks for active errors including FTS anomalies (FTSCheckException), range safety tracking losses (TrackingLossException), and cascade warnings across services. Returns GO/NO-GO data.",
+  "description": "Comprehensive launch safety assessment. Evaluates all critical NOVA-7 services against launch commit criteria. Checks for active errors including FTS anomalies (FTSCheckException), range safety tracking losses (TrackingLossException), and cascade warnings across services. Returns GO/NO-GO data. Log message field: body.text (never use 'body' alone).",
   "configuration": {
     "query": "FROM logs | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text IN (\"ERROR\", \"WARN\") | STATS error_count = COUNT(*) WHERE severity_text == \"ERROR\", warn_count = COUNT(*) WHERE severity_text == \"WARN\" BY service.name | SORT error_count DESC",
     "params": {}
@@ -204,7 +206,7 @@ create_tool "launch_safety_assessment" '{
 create_tool "esql_telemetry_query" '{
   "id": "esql_telemetry_query",
   "type": "esql",
-  "description": "Run custom ES|QL queries against NOVA-7 telemetry logs for advanced analytics, threshold validation, and anomaly detection. Available fields: @timestamp, body.text (log message — error types like FuelPressureException appear here), severity_text (INFO/WARN/ERROR), service.name (9 services), log.level. Use body.text LIKE \"*ErrorType*\" to match specific error types. Example: FROM logs | WHERE body.text LIKE \"*FuelPressureException*\" AND severity_text == \"ERROR\" | STATS count = COUNT(*)",
+  "description": "Run custom ES|QL queries against NOVA-7 telemetry logs for advanced analytics, threshold validation, and anomaly detection. CRITICAL: The log message column is body.text (NOT body — using 'body' alone causes Unknown column errors). Available fields: @timestamp, body.text (log message), severity_text (INFO/WARN/ERROR), service.name (9 services), log.level. Use body.text LIKE \"*ErrorType*\" to match specific error types. Example: FROM logs | WHERE body.text LIKE \"*FuelPressureException*\" AND severity_text == \"ERROR\" | STATS count = COUNT(*)",
   "configuration": {
     "query": "FROM logs | WHERE @timestamp > NOW() - 15 MINUTES | LIMIT 25",
     "params": {}
@@ -240,9 +242,43 @@ fi
 create_tool "remediation_action" '{
   "id": "remediation_action",
   "type": "workflow",
-  "description": "Execute remediation actions for NOVA-7 anomalies. Triggers the Remediation Action workflow which resolves fault channels, captures before/after error counts, and logs to the audit trail. Inputs: channel (1-20), action_type (recalibrate_sensor, restart_service, failover_service, isolate_subsystem), target_service, justification, dry_run.",
+  "description": "Execute remediation actions for NOVA-7 anomalies. Triggers the Remediation Action workflow which searches for the specific error, extracts the callback URL, resolves the fault channel, captures before/after error counts, and logs to the audit trail. Inputs: error_type (e.g. FuelPressureException), channel (1-20), action_type (recalibrate_sensor, restart_service, failover_service, isolate_subsystem), target_service, justification, dry_run.",
   "configuration": {
     "workflow_id": "'"${REMEDIATION_WF_ID}"'"
+  }
+}'
+
+# Discover the "NOVA-7 Escalation and Hold Management" workflow ID
+log_info "Discovering Escalation workflow ID..."
+ESCALATION_WF_ID=""
+if [[ -n "$wf_search" ]]; then
+    ESCALATION_WF_ID=$(echo "$wf_search" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
+    for item in items:
+        if 'Escalation' in item.get('name', ''):
+            print(item['id'])
+            break
+except:
+    pass
+" 2>/dev/null || true)
+fi
+
+if [[ -z "$ESCALATION_WF_ID" ]]; then
+    log_warn "Could not find Escalation workflow. Ensure setup-workflows.sh ran first."
+    ESCALATION_WF_ID="WORKFLOW_ID_NOT_FOUND"
+else
+    log_ok "Found Escalation workflow: ${ESCALATION_WF_ID}"
+fi
+
+create_tool "escalation_action" '{
+  "id": "escalation_action",
+  "type": "workflow",
+  "description": "Escalate critical anomalies and manage launch hold decisions. Triggers the Escalation and Hold Management workflow. Supports four actions: escalate (flag for launch director attention), request_hold (stop countdown), resolve (mark anomaly resolved), request_resume (restart countdown). Inputs: action (escalate, request_hold, resolve, request_resume), channel (1-20), severity (ADVISORY, CAUTION, WARNING, CRITICAL), justification, hold_id (for resolve/resume), investigation_summary (for resolve).",
+  "configuration": {
+    "workflow_id": "'"${ESCALATION_WF_ID}"'"
   }
 }'
 

@@ -77,19 +77,36 @@ class SensorValidatorService(BaseService):
             return
         confidence = round(random.uniform(0.1, 0.5), 4)
         epoch = int(time.time()) - random.randint(3600, 86400)
+        attrs = {
+            "validation.result": "FAIL",
+            "validation.sensor_type": ch["sensor_type"],
+            "validation.calibration_epoch": epoch,
+            "validation.confidence": confidence,
+            "error.type": ch["error_type"],
+            "vehicle_section": ch["vehicle_section"],
+            "chaos.channel": channel,
+            "chaos.fault_type": ch["name"],
+            "operation": "sensor_validation",
+            "system.status": "CRITICAL",
+        }
+        # Inject callback URL and user email for workflow auto-remediation
+        meta = self.chaos_controller.get_channel_metadata(channel)
+        if meta.get("callback_url"):
+            attrs["chaos.callback_url"] = meta["callback_url"]
+        if meta.get("user_email"):
+            attrs["chaos.user_email"] = meta["user_email"]
+
+        # Set event_name with remediation metadata (indexed keyword field)
+        ev_name = None
+        if meta.get("callback_url") or meta.get("user_email"):
+            import json as _json
+            ev_name = _json.dumps({
+                "callback_url": meta.get("callback_url", ""),
+                "user_email": meta.get("user_email", ""),
+            })
         self.emit_log(
             "ERROR",
             f"Validation FAIL: {ch['sensor_type']} sensor calibration out of bounds — {ch['error_type']}",
-            {
-                "validation.result": "FAIL",
-                "validation.sensor_type": ch["sensor_type"],
-                "validation.calibration_epoch": epoch,
-                "validation.confidence": confidence,
-                "error.type": ch["error_type"],
-                "vehicle_section": ch["vehicle_section"],
-                "chaos.channel": channel,
-                "chaos.fault_type": ch["name"],
-                "operation": "sensor_validation",
-                "system.status": "CRITICAL",
-            },
+            attrs,
+            event_name=ev_name,
         )

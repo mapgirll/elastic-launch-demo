@@ -9,6 +9,15 @@
     function init() {
         fetchChannels();
         setInterval(fetchStatus, 2000);
+        // Auto-populate email from X-Forwarded-User header
+        fetch('/api/user/info')
+            .then(r => r.json())
+            .then(data => {
+                if (data.email) {
+                    document.getElementById('user-email').value = data.email;
+                }
+            })
+            .catch(() => { /* ignore */ });
     }
 
     function fetchChannels() {
@@ -92,6 +101,8 @@
     window.triggerFault = function () {
         if (!selectedChannel) return;
         const mode = document.querySelector('input[name="fault-mode"]:checked').value;
+        const userEmail = document.getElementById('user-email').value.trim();
+        const callbackUrl = window.location.origin;
 
         fetch('/api/chaos/trigger', {
             method: 'POST',
@@ -100,6 +111,8 @@
                 channel: selectedChannel,
                 mode: mode,
                 se_name: channelData[selectedChannel]?.name || '',
+                callback_url: callbackUrl,
+                user_email: userEmail,
             }),
         })
             .then(r => r.json())

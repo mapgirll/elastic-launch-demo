@@ -135,11 +135,14 @@ class BaseService(ABC):
         level: str,
         message: str,
         extra_attrs: dict[str, Any] | None = None,
+        event_name: str | None = None,
     ) -> None:
         attrs = self._base_log_attrs()
         if extra_attrs:
             attrs.update(extra_attrs)
-        record = self.otlp.build_log_record(severity=level, body=message, attributes=attrs)
+        record = self.otlp.build_log_record(
+            severity=level, body=message, attributes=attrs, event_name=event_name,
+        )
         self.otlp.send_logs(self.resource, [record])
 
     def emit_metric(
@@ -210,7 +213,22 @@ class BaseService(ABC):
                     "system.status": "CRITICAL",
                 }
             )
-            self.emit_log("ERROR", msg, attrs)
+            # Inject callback URL and user email for workflow auto-remediation
+            meta = self.chaos_controller.get_channel_metadata(channel)
+            if meta.get("callback_url"):
+                attrs["chaos.callback_url"] = meta["callback_url"]
+            if meta.get("user_email"):
+                attrs["chaos.user_email"] = meta["user_email"]
+
+            # Set event_name with remediation metadata (indexed keyword field)
+            ev_name = None
+            if meta.get("callback_url") or meta.get("user_email"):
+                import json as _json
+                ev_name = _json.dumps({
+                    "callback_url": meta.get("callback_url", ""),
+                    "user_email": meta.get("user_email", ""),
+                })
+            self.emit_log("ERROR", msg, attrs, event_name=ev_name)
 
     def emit_cascade_logs(self, channel: int) -> None:
         """Emit warning logs for cascading effects (not matching the SE query)."""

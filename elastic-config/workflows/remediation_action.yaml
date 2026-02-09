@@ -2,13 +2,18 @@ version: "1"
 name: NOVA-7 Remediation Action
 description: >
   Execute remediation actions for NOVA-7 anomalies. Captures pre-action
-  state, executes the remediation via HTTP, waits for stabilization,
-  verifies success, and logs the result to an audit index.
+  state, extracts callback_url from log event_name, executes the
+  remediation via HTTP callback, waits for stabilization, verifies
+  error counts dropped, and logs the result to an audit index.
 
 triggers:
   - type: manual
 
 inputs:
+  - name: error_type
+    type: string
+    required: true
+    description: "Error type to remediate (e.g. FuelPressureException)"
   - name: channel
     type: number
     required: true
@@ -34,34 +39,36 @@ steps:
     type: elasticsearch.search
     with:
       index: "logs"
-      size: 0
+      size: 5
       query:
         bool:
+          must:
+            - match:
+                body.text: "{{ inputs.error_type }}"
+            - term:
+                severity_text: "ERROR"
           filter:
             - range:
                 "@timestamp":
-                  gte: "now-2m"
-            - term:
-                severity_text: "ERROR"
-      aggs:
-        error_count:
-          value_count:
-            field: "attributes.error.type"
-        by_service:
-          terms:
-            field: "resource.attributes.service.name"
+                  gte: "now-30m"
+
+  - name: extract_callback
+    type: data.set
+    with:
+      var:
+        - event_meta: "${{ steps.pre_action_snapshot.output.hits.hits[0]._source.event_name | json_parse }}"
 
   - name: log_pre_action
     type: console
     with:
       message: >
         Pre-action snapshot for channel {{ inputs.channel }}:
-        {{ steps.pre_action_snapshot.output.aggregations.error_count.value }} errors
-        across services: {{ steps.pre_action_snapshot.output.aggregations.by_service.buckets | json }}
+        {{ steps.pre_action_snapshot.output.hits.total.value }} errors in last 5 minutes.
+        callback_url: {{ steps.extract_callback.output.var[0].event_meta.callback_url }}.
 
   - name: safety_check
     type: if
-    condition: "{{ inputs.action_type }} : restart_service"
+    condition: "inputs.action_type : restart_service"
     steps:
       - name: log_safety_warning
         type: console
@@ -71,7 +78,7 @@ steps:
   - name: execute_remediation
     type: http
     with:
-      url: "http://localhost/api/remediate/{{ inputs.channel }}"
+      url: "{{ steps.extract_callback.output.var[0].event_meta.callback_url }}/api/chaos/resolve"
       method: POST
       headers:
         Content-Type: application/json
@@ -106,14 +113,10 @@ steps:
                   gte: "now-30s"
             - term:
                 severity_text: "ERROR"
-      aggs:
-        error_count:
-          value_count:
-            field: "attributes.error.type"
 
   - name: evaluate_result
     type: if
-    condition: "{{ steps.post_action_snapshot.output.aggregations.error_count.value }} : 0"
+    condition: "steps.post_action_snapshot.output.hits.total.value : 0"
     steps:
       - name: log_success
         type: console
@@ -125,7 +128,7 @@ steps:
         with:
           message: >
             Remediation PARTIAL: Post-action errors =
-            {{ steps.post_action_snapshot.output.aggregations.error_count.value }}.
+            {{ steps.post_action_snapshot.output.hits.total.value }}.
             Manual investigation may be needed.
 
   - name: audit_log
@@ -138,7 +141,7 @@ steps:
         target_service: "{{ inputs.target_service }}"
         justification: "{{ inputs.justification }}"
         dry_run: "{{ inputs.dry_run }}"
-        pre_error_count: "{{ steps.pre_action_snapshot.output.aggregations.error_count.value }}"
-        post_error_count: "{{ steps.post_action_snapshot.output.aggregations.error_count.value }}"
+        pre_error_count: "{{ steps.pre_action_snapshot.output.hits.total.value }}"
+        post_error_count: "{{ steps.post_action_snapshot.output.hits.total.value }}"
         mission_id: "NOVA-7"
       refresh: wait_for

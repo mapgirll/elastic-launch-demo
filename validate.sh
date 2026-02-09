@@ -54,6 +54,7 @@ kb_get() {
     curl -s -w "\n%{http_code}" \
         -H "Authorization: ApiKey ${ELASTIC_API_KEY}" \
         -H "kbn-xsrf: true" \
+        -H "x-elastic-internal-origin: kibana" \
         "${KIBANA_URL}${path}" 2>/dev/null
 }
 
@@ -64,6 +65,7 @@ kb_post() {
         -H "Authorization: ApiKey ${ELASTIC_API_KEY}" \
         -H "Content-Type: application/json" \
         -H "kbn-xsrf: true" \
+        -H "x-elastic-internal-origin: kibana" \
         "${KIBANA_URL}${path}" \
         ${body:+-d "$body"} 2>/dev/null
 }
@@ -202,9 +204,463 @@ print(len(custom))
 else
     warn "Agent Builder tools API not accessible (HTTP $tools_code)"
 fi
+
+# Check agent instructions for body.text field name warnings
+agent_instructions=$(echo "$agents_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+agents = data if isinstance(data, list) else data.get('results', data.get('agents', data.get('data', [])))
+for a in agents:
+    if 'nova' in a.get('name','').lower() or 'nova' in a.get('id','').lower():
+        print(a.get('configuration', {}).get('instructions', ''))
+        break
+" 2>/dev/null || echo "")
+
+if echo "$agent_instructions" | grep -q "body.text" && echo "$agent_instructions" | grep -q "NEVER"; then
+    pass "Agent prompt has body.text field name warnings (prevents Unknown column [body] bug)"
+elif [[ -n "$agent_instructions" ]]; then
+    fail "Agent prompt MISSING body.text warnings — will cause ES|QL Unknown column [body] errors"
+else
+    warn "Could not check agent instructions"
+fi
+
+# Check ES|QL tool descriptions mention body.text
+if [[ "$tools_code" -ge 200 && "$tools_code" -lt 300 ]]; then
+    esql_tools_bodytext=$(echo "$tools_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+tools = data if isinstance(data, list) else data.get('results', data.get('tools', data.get('data', [])))
+esql_ids = ['esql_telemetry_query', 'search_subsystem_health', 'check_service_status', 'trace_anomaly_propagation', 'launch_safety_assessment']
+missing = []
+for t in tools:
+    if t.get('id', '') in esql_ids:
+        if 'body.text' not in t.get('description', ''):
+            missing.append(t['id'])
+print(','.join(missing) if missing else 'all_ok')
+" 2>/dev/null || echo "unknown")
+
+    if [[ "$esql_tools_bodytext" == "all_ok" ]]; then
+        pass "All ES|QL tools mention body.text in descriptions"
+    else
+        fail "ES|QL tools missing body.text warning: $esql_tools_bodytext"
+    fi
+fi
 echo ""
 
-# ── 6. Dashboard (serverless-compatible: uses _export, NOT _get/_find) ───────
+# ── 6. Workflows ─────────────────────────────────────────────────────────────
+echo "--- Workflows ---"
+
+wf_search_response=$(kb_post "/api/workflows/search" '{"page":1,"size":100}')
+wf_search_code=$(echo "$wf_search_response" | tail -1)
+wf_search_body=$(echo "$wf_search_response" | sed '$d')
+
+if [[ "$wf_search_code" -ge 200 && "$wf_search_code" -lt 300 ]]; then
+    # Check all 3 NOVA-7 workflows exist and are valid
+    wf_check=$(echo "$wf_search_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
+expected = {
+    'Significant Event Notification': {'found': False, 'valid': False, 'id': '', 'has_alert_trigger': False},
+    'Remediation Action': {'found': False, 'valid': False, 'id': '', 'has_callback_url': False},
+    'Escalation and Hold Management': {'found': False, 'valid': False, 'id': ''},
+}
+for item in items:
+    name = item.get('name', '')
+    for key in expected:
+        if key in name:
+            expected[key]['found'] = True
+            expected[key]['valid'] = item.get('valid', False)
+            expected[key]['id'] = item.get('id', '')
+            defn = item.get('definition', {}) or {}
+            triggers = defn.get('triggers', [])
+            if key == 'Significant Event Notification':
+                expected[key]['has_alert_trigger'] = any(t.get('type') == 'alert' for t in triggers)
+            if key == 'Remediation Action':
+                inputs = defn.get('inputs', [])
+                expected[key]['has_callback_url'] = any(i.get('name') == 'callback_url' for i in inputs)
+for key, val in expected.items():
+    print(f'{key}|{val[\"found\"]}|{val[\"valid\"]}|{val[\"id\"]}|{json.dumps(val)}')
+" 2>/dev/null || true)
+
+    while IFS='|' read -r wf_name wf_found wf_valid wf_id wf_json; do
+        if [[ -z "$wf_name" ]]; then continue; fi
+        if [[ "$wf_found" == "True" && "$wf_valid" == "True" ]]; then
+            pass "Workflow '$wf_name' exists and is valid (id: ${wf_id})"
+        elif [[ "$wf_found" == "True" ]]; then
+            fail "Workflow '$wf_name' exists but is NOT valid"
+        else
+            fail "Workflow '$wf_name' NOT found"
+        fi
+    done <<< "$wf_check"
+
+    # Check Significant Event Notification has alert trigger
+    sen_alert=$(echo "$wf_search_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
+for item in items:
+    if 'Significant Event Notification' in item.get('name', ''):
+        defn = item.get('definition', {}) or {}
+        triggers = defn.get('triggers', [])
+        print('yes' if any(t.get('type') == 'alert' for t in triggers) else 'no')
+        break
+" 2>/dev/null || echo "unknown")
+
+    if [[ "$sen_alert" == "yes" ]]; then
+        pass "Notification workflow has 'alert' trigger type"
+    else
+        fail "Notification workflow MISSING 'alert' trigger — alerts won't trigger it"
+    fi
+
+    # Check Remediation Action extracts callback_url from event_name
+    rem_callback=$(echo "$wf_search_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
+for item in items:
+    if 'Remediation Action' in item.get('name', ''):
+        yaml_str = item.get('yaml', '')
+        if 'event_meta.callback_url' in yaml_str and 'json_parse' in yaml_str:
+            print('yes'); break
+        print('no'); break
+" 2>/dev/null || echo "unknown")
+
+    if [[ "$rem_callback" == "yes" ]]; then
+        pass "Remediation workflow extracts callback_url from event_name"
+    else
+        fail "Remediation workflow MISSING callback_url extraction from event_name"
+    fi
+
+    # Check Notification workflow has email step with Elastic-Cloud-SMTP
+    notif_email=$(echo "$wf_search_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
+for item in items:
+    if 'Significant Event Notification' in item.get('name', ''):
+        yaml_text = item.get('yaml', '')
+        has_email_step = 'type: email' in yaml_text
+        has_smtp = 'Elastic-Cloud-SMTP' in yaml_text
+        print('yes' if (has_email_step and has_smtp) else 'no')
+        break
+" 2>/dev/null || echo "unknown")
+
+    if [[ "$notif_email" == "yes" ]]; then
+        pass "Notification workflow has email step with Elastic-Cloud-SMTP connector"
+    else
+        fail "Notification workflow MISSING email step with Elastic-Cloud-SMTP"
+    fi
+
+    # Check Notification workflow uses var[0] access pattern for parsed event_meta
+    notif_var0=$(echo "$wf_search_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
+for item in items:
+    if 'Significant Event Notification' in item.get('name', ''):
+        yaml_text = item.get('yaml', '')
+        has_var0 = 'var[0].event_meta' in yaml_text
+        has_json_parse = 'json_parse' in yaml_text
+        print('yes' if (has_var0 and has_json_parse) else 'no')
+        break
+" 2>/dev/null || echo "unknown")
+
+    if [[ "$notif_var0" == "yes" ]]; then
+        pass "Notification workflow uses var[0].event_meta access + json_parse"
+    else
+        fail "Notification workflow MISSING var[0] access pattern — email extraction will fail"
+    fi
+
+    # Check Notification workflow enrich_context uses wide time window (>= 15m)
+    notif_window=$(echo "$wf_search_body" | python3 -c "
+import sys, json, re
+data = json.load(sys.stdin)
+items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
+for item in items:
+    if 'Significant Event Notification' in item.get('name', ''):
+        yaml_text = item.get('yaml', '')
+        m = re.search(r'gte:\s*[\"'']?now-(\d+)m[\"'']?', yaml_text)
+        if m:
+            minutes = int(m.group(1))
+            print('yes' if minutes >= 15 else f'no:{minutes}m')
+        else:
+            print('no:unknown')
+        break
+" 2>/dev/null || echo "unknown")
+
+    if [[ "$notif_window" == yes* ]]; then
+        pass "Notification workflow enrich_context uses >= 15m time window"
+    else
+        fail "Notification workflow time window too narrow ($notif_window) — may miss logs"
+    fi
+
+    # Check Remediation workflow uses /api/chaos/resolve endpoint
+    rem_resolve=$(echo "$wf_search_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
+for item in items:
+    if 'Remediation Action' in item.get('name', ''):
+        yaml_text = item.get('yaml', '')
+        print('yes' if '/api/chaos/resolve' in yaml_text else 'no')
+        break
+" 2>/dev/null || echo "unknown")
+
+    if [[ "$rem_resolve" == "yes" ]]; then
+        pass "Remediation workflow uses /api/chaos/resolve endpoint"
+    else
+        fail "Remediation workflow MISSING /api/chaos/resolve — remediation won't work"
+    fi
+
+    # Check all workflows are enabled
+    wf_disabled=$(echo "$wf_search_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+items = data if isinstance(data, list) else data.get('results', data.get('items', data.get('data', [])))
+disabled = [i.get('name','') for i in items if 'NOVA-7' in i.get('name','') and not i.get('enabled', True)]
+print(','.join(disabled) if disabled else 'all_enabled')
+" 2>/dev/null || echo "unknown")
+
+    if [[ "$wf_disabled" == "all_enabled" ]]; then
+        pass "All NOVA-7 workflows are enabled"
+    else
+        fail "Disabled workflows: $wf_disabled"
+    fi
+else
+    fail "Workflows API not accessible (HTTP $wf_search_code)"
+fi
+echo ""
+
+# ── 6b. Alert Rules ─────────────────────────────────────────────────────────
+echo "--- Alert Rules ---"
+
+alert_response=$(kb_get "/api/alerting/rules/_find?per_page=100&filter=alert.attributes.tags:nova7")
+alert_code=$(echo "$alert_response" | tail -1)
+alert_body=$(echo "$alert_response" | sed '$d')
+
+if [[ "$alert_code" -ge 200 && "$alert_code" -lt 300 ]]; then
+    alert_check=$(echo "$alert_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+rules = data.get('data', [])
+nova7_rules = [r for r in rules if r.get('name', '').startswith('NOVA-7 CH')]
+wf_rules = [r for r in nova7_rules if any(a.get('connector_type_id') == '.workflows' for a in r.get('actions', []))]
+webhook_rules = [r for r in nova7_rules if any(a.get('connector_type_id') == '.webhook' for a in r.get('actions', []))]
+print(f'{len(nova7_rules)}|{len(wf_rules)}|{len(webhook_rules)}')
+" 2>/dev/null || echo "0|0|0")
+
+    IFS='|' read -r total_rules wf_rules webhook_rules <<< "$alert_check"
+
+    if [[ "$total_rules" -ge 20 ]]; then
+        pass "Alert rules: $total_rules NOVA-7 rules found (expected 20)"
+    elif [[ "$total_rules" -gt 0 ]]; then
+        warn "Alert rules: only $total_rules found (expected 20)"
+    else
+        fail "No NOVA-7 alert rules found (run setup-alerting.sh)"
+    fi
+
+    if [[ "$wf_rules" -ge 20 ]]; then
+        pass "All $wf_rules rules use native .workflows connector"
+    elif [[ "$wf_rules" -gt 0 ]]; then
+        warn "Only $wf_rules rules use .workflows connector ($webhook_rules still on .webhook)"
+    else
+        fail "No rules using .workflows connector — run setup-alerting.sh"
+    fi
+else
+    warn "Alerting API not accessible (HTTP $alert_code)"
+fi
+echo ""
+
+# ── 6c. E2E Workflow Test — Trigger fault and verify event_name in logs ─────
+echo "--- E2E: Fault Trigger + event_name in Logs ---"
+
+# Trigger a fault on channel 20 (Range Safety) with test metadata
+e2e_resolve=$(curl -s -X POST http://localhost/api/chaos/resolve -H "Content-Type: application/json" -d '{"channel": 20}' 2>/dev/null || echo "")
+sleep 2
+e2e_trigger=$(curl -s -X POST http://localhost/api/chaos/trigger \
+  -H "Content-Type: application/json" \
+  -d '{"channel": 20, "callback_url": "http://ec2-3-15-164-206.us-east-2.compute.amazonaws.com", "user_email": "david.hope@elastic.co"}' 2>/dev/null || echo "")
+
+if echo "$e2e_trigger" | grep -q '"status":"triggered"' 2>/dev/null; then
+    pass "E2E: Fault triggered on channel 20 with callback_url + user_email"
+
+    # Wait for logs to be ingested
+    sleep 15
+
+    # Check that event_name field has our metadata in recent logs
+    e2e_search=$(es_post "/logs/_search" '{"size":1,"query":{"bool":{"filter":[{"range":{"@timestamp":{"gte":"now-1m"}}},{"match_phrase":{"body.text":"TrackingLossException"}},{"term":{"severity_text":"ERROR"}}]}},"_source":["event_name"]}')
+    e2e_search_code=$(echo "$e2e_search" | tail -1)
+    e2e_search_body=$(echo "$e2e_search" | sed '$d')
+
+    if [[ "$e2e_search_code" -ge 200 && "$e2e_search_code" -lt 300 ]]; then
+        e2e_event_name=$(echo "$e2e_search_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+hits = data.get('hits', {}).get('hits', [])
+if hits:
+    en = hits[0].get('_source', {}).get('event_name', '')
+    print(en)
+else:
+    print('')
+" 2>/dev/null || echo "")
+
+        if echo "$e2e_event_name" | grep -q "callback_url" 2>/dev/null && echo "$e2e_event_name" | grep -q "user_email" 2>/dev/null; then
+            pass "E2E: event_name contains callback_url + user_email metadata"
+        elif [[ -n "$e2e_event_name" ]]; then
+            warn "E2E: event_name present but may be missing fields: $e2e_event_name"
+        else
+            fail "E2E: event_name is empty — metadata not being injected into fault logs"
+        fi
+    else
+        warn "E2E: Could not search logs (HTTP $e2e_search_code)"
+    fi
+
+    # Resolve the test fault
+    curl -s -X POST http://localhost/api/chaos/resolve -H "Content-Type: application/json" -d '{"channel": 20}' > /dev/null 2>&1
+else
+    warn "E2E: Could not trigger fault (app not running?)"
+fi
+echo ""
+
+# ── 6d. E2E Workflow Execution Tests — Actually run workflows and check status ──
+echo "--- E2E: Workflow Execution Tests ---"
+
+# Find workflow IDs
+wf_search_response=$(kb_post "/api/workflows/search" '{"page":1,"size":100}')
+wf_search_code=$(echo "$wf_search_response" | tail -1)
+wf_search_body=$(echo "$wf_search_response" | sed '$d')
+
+if [[ "$wf_search_code" -ge 200 && "$wf_search_code" -lt 300 ]]; then
+    # Extract workflow IDs by name
+    escalation_wf_id=$(echo "$wf_search_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for w in data.get('results', []):
+    if 'Escalation' in w.get('name', ''):
+        print(w['id']); break
+" 2>/dev/null || echo "")
+
+    remediation_wf_id=$(echo "$wf_search_body" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for w in data.get('results', []):
+    if 'Remediation' in w.get('name', ''):
+        print(w['id']); break
+" 2>/dev/null || echo "")
+
+    # --- Test Escalation Workflow ---
+    if [[ -n "$escalation_wf_id" ]]; then
+        esc_run_response=$(kb_post "/api/workflows/${escalation_wf_id}/run" \
+            '{"inputs":{"action":"escalate","channel":1,"severity":"ADVISORY","justification":"Validation test - automated escalation check","hold_id":"","investigation_summary":""}}')
+        esc_run_code=$(echo "$esc_run_response" | tail -1)
+        esc_run_body=$(echo "$esc_run_response" | sed '$d')
+
+        if [[ "$esc_run_code" -ge 200 && "$esc_run_code" -lt 300 ]]; then
+            esc_exec_id=$(echo "$esc_run_body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('workflowExecutionId',''))" 2>/dev/null || echo "")
+            if [[ -n "$esc_exec_id" ]]; then
+                # Wait for completion (escalation is fast — no wait step)
+                sleep 12
+                esc_status_response=$(kb_get "/api/workflowExecutions/${esc_exec_id}")
+                esc_status_code=$(echo "$esc_status_response" | tail -1)
+                esc_status_body=$(echo "$esc_status_response" | sed '$d')
+                esc_status=$(echo "$esc_status_body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")
+
+                if [[ "$esc_status" == "completed" ]]; then
+                    pass "E2E: Escalation workflow executed successfully (status: completed)"
+                elif [[ "$esc_status" == "running" ]]; then
+                    warn "E2E: Escalation workflow still running after 12s"
+                else
+                    esc_err=$(echo "$esc_status_body" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+e=d.get('error',{})
+print(e.get('message','') if isinstance(e,dict) else str(e))
+" 2>/dev/null || echo "unknown error")
+                    fail "E2E: Escalation workflow failed (status: $esc_status, error: $esc_err)"
+                fi
+            else
+                fail "E2E: Escalation workflow run returned no execution ID"
+            fi
+        else
+            fail "E2E: Escalation workflow run failed (HTTP $esc_run_code)"
+        fi
+    else
+        warn "E2E: Escalation workflow not found — cannot test execution"
+    fi
+
+    # --- Test Remediation Workflow ---
+    # Remediation needs an active fault with callback_url in event_name logs.
+    # Trigger fault on channel 2 first, wait for logs, then run workflow.
+    if [[ -n "$remediation_wf_id" ]]; then
+        # Get public hostname for callback URL
+        REM_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
+        REM_HOST=""
+        if [[ -n "$REM_TOKEN" ]]; then
+            REM_HOST=$(curl -s -H "X-aws-ec2-metadata-token: $REM_TOKEN" http://169.254.169.254/latest/meta-data/public-hostname 2>/dev/null || echo "")
+        fi
+        if [[ -z "$REM_HOST" ]]; then
+            REM_HOST=$(hostname -I | awk '{print $1}')
+        fi
+        REM_CALLBACK="http://${REM_HOST}"
+
+        # Resolve any existing fault, then trigger fresh
+        curl -s -X POST http://localhost/api/chaos/resolve -H "Content-Type: application/json" -d '{"channel": 2}' > /dev/null 2>&1
+        sleep 1
+        rem_trigger=$(curl -s -X POST http://localhost/api/chaos/trigger \
+            -H "Content-Type: application/json" \
+            -d "{\"channel\": 2, \"callback_url\": \"${REM_CALLBACK}\", \"user_email\": \"validate@nova7.test\"}" 2>/dev/null || echo "")
+
+        if echo "$rem_trigger" | grep -q '"status":"triggered"' 2>/dev/null; then
+            # Wait for fault logs with event_name to be ingested
+            sleep 12
+
+            rem_run_response=$(kb_post "/api/workflows/${remediation_wf_id}/run" \
+                '{"inputs":{"error_type":"FuelPressureException","channel":2,"action_type":"recalibrate_sensor","target_service":"fuel-system","justification":"Validation test - automated remediation check","dry_run":false}}')
+        rem_run_code=$(echo "$rem_run_response" | tail -1)
+        rem_run_body=$(echo "$rem_run_response" | sed '$d')
+
+        if [[ "$rem_run_code" -ge 200 && "$rem_run_code" -lt 300 ]]; then
+            rem_exec_id=$(echo "$rem_run_body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('workflowExecutionId',''))" 2>/dev/null || echo "")
+            if [[ -n "$rem_exec_id" ]]; then
+                # Remediation has a 30s wait step — need ~45s total
+                sleep 45
+                rem_status_response=$(kb_get "/api/workflowExecutions/${rem_exec_id}")
+                rem_status_code=$(echo "$rem_status_response" | tail -1)
+                rem_status_body=$(echo "$rem_status_response" | sed '$d')
+                rem_status=$(echo "$rem_status_body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo "unknown")
+
+                if [[ "$rem_status" == "completed" ]]; then
+                    pass "E2E: Remediation workflow executed successfully (status: completed)"
+                elif [[ "$rem_status" == "running" ]]; then
+                    warn "E2E: Remediation workflow still running after 45s (has 30s wait step)"
+                else
+                    rem_err=$(echo "$rem_status_body" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+e=d.get('error',{})
+print(e.get('message','') if isinstance(e,dict) else str(e))
+" 2>/dev/null || echo "unknown error")
+                    fail "E2E: Remediation workflow failed (status: $rem_status, error: $rem_err)"
+                fi
+            else
+                fail "E2E: Remediation workflow run returned no execution ID"
+            fi
+        else
+            fail "E2E: Remediation workflow run failed (HTTP $rem_run_code)"
+        fi
+        else
+            warn "E2E: Could not trigger fault on channel 2 for remediation test (app not running?)"
+        fi
+    else
+        warn "E2E: Remediation workflow not found — cannot test execution"
+    fi
+else
+    warn "E2E: Could not list workflows (HTTP $wf_search_code) — skipping execution tests"
+fi
+echo ""
+
+# ── 7. Dashboard (serverless-compatible: uses _export, NOT _get/_find) ───────
 echo "--- Executive Dashboard ---"
 dash_response=$(kb_post "/api/saved_objects/_export" '{"objects":[{"type":"dashboard","id":"nova7-exec-dashboard"}],"includeReferencesDeep":false}')
 dash_code=$(echo "$dash_response" | tail -1)

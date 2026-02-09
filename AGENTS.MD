@@ -68,6 +68,8 @@ POST /api/agent_builder/agents
 - System prompt is `configuration.instructions`, NOT `system_prompt` at top level
 - Tools must be `configuration.tools: [{tool_ids: [...]}]` (array of objects with tool_ids array)
 - If agent already exists, POST returns error; use PUT with agent ID to update
+- **CRITICAL: Agent PUT truncates instructions** — The PUT endpoint for agents does NOT reliably update `configuration.instructions` (system prompt). The instructions may be silently truncated or ignored. **Workaround:** DELETE the agent first (`DELETE /api/agent_builder/agents/{agent_id}`), then POST to recreate it fresh. This is the only reliable way to update the system prompt.
+- **Verification after deploy:** Always verify the deployed agent's instructions length and content via `GET /api/agent_builder/agents`. Compare against expected content to catch silent truncation.
 
 ### Validation
 ```
@@ -266,7 +268,7 @@ inputs:
 |------|-------------|-------------------|
 | `console` | Log a message | `message` |
 | `http` | HTTP request | `url`, `method`, `headers`, `body`, `timeout` |
-| `elasticsearch.search` | ES search | `index`, `size`, `query`, `aggs` |
+| `elasticsearch.search` | ES search | `index`, `size`, `query` (NO `aggs`, `sort`, `_source`) |
 | `elasticsearch.index` | Index a doc | `index`, `document`, `id`, `refresh` |
 | `elasticsearch.request` | Generic ES | `method`, `path`, `headers`, `body` |
 | `elasticsearch.indices.exists` | Check index | `index` |
@@ -277,6 +279,7 @@ inputs:
 | `wait` | Delay | `duration` (e.g. "30s") |
 | `ai.agent` | AI agent call | `message` + `agent-id` (step-level) |
 | `ai.prompt` | AI prompt | `prompt`, `schema` + `connector-id` |
+| `email` | Send email | `to` (array), `subject`, `message` + `connector-id` |
 | `slack` | Slack message | `message` + `connector-id` |
 | `jira` | Jira ticket | `projectKey`, `summary` + `connector-id` |
 | `kibana.request` | Kibana API | `method`, `path`, `body` |
@@ -321,13 +324,20 @@ the workflow engine silently strips it and the agent step may fail or use a wron
   timeout: "30s"
 ```
 
-### CRITICAL: `elasticsearch.search` — `sort` is NOT allowed
-The `sort` field is **not in the workflow schema** for `elasticsearch.search`.
-Including `sort` causes `valid: false` with no useful error message — the name
-shows as "Untitled workflow" and `definition: null`. Remove `sort` from all
-`elasticsearch.search` steps.
+### CRITICAL: `elasticsearch.search` — Schema Restrictions
+The workflow schema for `elasticsearch.search` is extremely restrictive. Only
+`index`, `size`, and `query` reliably work. Many common ES features are NOT allowed:
+- `sort` → causes `Valid: false` (name shows as "Untitled workflow", `definition: null`)
+- `aggs` → causes validation warnings; use `size: 0` + `hits.total.value` for counts
+- `_source` → rejected; use small `size` instead of source filtering
+- `exists` query → causes `Valid: false`; use `must_not` + `match` as alternative
 
-**Allowed `with` fields for `elasticsearch.search`:** `index`, `size`, `query`, `aggs`.
+**Allowed `with` fields for `elasticsearch.search`:** `index`, `size`, `query`.
+
+**Workarounds:**
+- **Counting:** `size: 0` query → `{{ steps.X.output.hits.total.value }}`
+- **Sorting:** Use wide time ranges (`now-30m`) to compensate for no `sort`
+- **Source filtering:** Use small `size` (1-5) to limit payload
 
 ### Template Variables
 | Context | Syntax | Example |
@@ -656,7 +666,43 @@ POST /api/alerting/rule
 }
 ```
 
-### Webhook Connector
+### Native Workflows Connector (Preferred)
+Use the built-in `.workflows` system action to trigger workflows directly from alert rules.
+No need to create a webhook connector — the system connector ID is `system-connector-.workflows`.
+
+```json
+"actions": [{
+  "group": "query matched",
+  "id": "system-connector-.workflows",
+  "params": {
+    "subAction": "run",
+    "subActionParams": {
+      "workflowId": "<workflow-id>",
+      "inputs": {
+        "channel": 1,
+        "error_type": "SomeException",
+        "subsystem": "propulsion",
+        "severity": "high"
+      }
+    }
+  },
+  "frequency": {
+    "summary": false,
+    "notify_when": "onActiveAlert",
+    "throttle": null
+  }
+}]
+```
+
+**CRITICAL:**
+- `.workflows` is a **system action type** — you CANNOT create a connector for it (`POST /api/actions/connector` returns "System action creation is forbidden")
+- The workflow MUST have `type: alert` in its `triggers` list for the Workflows connector to appear in the UI
+- `subAction` must be `"run"` — any other value is rejected
+- **`subActionParams.inputs` resolves BLANK in workflow steps** — values passed via `inputs` in the alert action are NOT accessible as `{{ inputs.X }}` in the workflow. They resolve to empty strings in ALL step types (search, console, email, http). Use `event.*` namespace instead (e.g., `event.rule.tags[1]`, `event.rule.name`)
+- Alert context is available via `event.*` namespace: `event.rule.name`, `event.rule.tags[N]`, `event.alerts[0].kibana.alert.*`, `event.spaceId`
+- Encode key data in alert rule `tags` for easy workflow access: `tags: ["nova7", "FuelPressureException"]` → `{{ event.rule.tags[1] }}`
+
+### Webhook Connector (Legacy)
 ```
 POST /api/actions/connector
 {
@@ -688,3 +734,15 @@ POST /api/actions/connector
 15. **Workflow execution API** — `GET /api/workflowExecutions?workflowId={id}` lists executions. `GET /api/workflowExecutions/{executionId}` gets details (status, error, startedAt, finishedAt). The `history` field on the workflow object only shows completed runs
 16. **OTel CPU state names** — Use `wait` not `iowait` for I/O wait CPU state. The OTel standard CPU states are: `user`, `system`, `idle`, `wait`, `nice`, `interrupt`, `softirq`, `steal`. Elastic Infrastructure UI dashboards filter by these exact names
 17. **Passthrough mapping on `logs` stream** — OTLP `attributes.*` and most `resource.attributes.*` use passthrough mapping (stored in `_source` but NOT indexed). Only `body.text`, `severity_text`, `service.name`, `resource.attributes.service.name`, `host.name`, `@timestamp` are indexed. Use `body.text LIKE "*ErrorType*"` for ES|QL, `body.text: "ErrorType"` for KQL, and `match`/`match_phrase` on `body.text` for query DSL
+18. **AI agent body vs body.text bug** — The AI agent (LLM) will construct ES|QL queries using `body` instead of `body.text`, causing `verification_exception: Unknown column [body]`. To prevent this: (a) add a prominent `## CRITICAL: Field Names` warning block in the agent system prompt, (b) add `body.text (NOT body)` warnings to every ES|QL tool description, (c) add validation in `validate.sh` to check deployed agent instructions and tool descriptions contain `body.text` warnings. This is a recurring issue because `body` seems natural but the OTLP mapping creates `body.text` as the actual indexed text field
+19. **Agent PUT does not update instructions reliably** — When updating an existing agent via `PUT /api/agent_builder/agents/{id}`, the `configuration.instructions` field may be silently truncated. Always DELETE + POST to recreate the agent when updating the system prompt
+20. **Tool type changes require DELETE before POST** — `PUT /api/agent_builder/tools/{id}` cannot change the `type` field (returns 400 if included). To change a tool's type (e.g., `esql` → `workflow`), you must DELETE the old tool first, then POST the new one. Use a `create_tool` pattern that always deletes before creating
+21. **`index_search` tool pattern — use exact stream name** — Set `configuration.pattern` to `"logs"` (the exact data stream name), NOT `"logs*"` or `"logs-*"`. A wildcard pattern like `logs*` causes the agent to search across unrelated indices (nginx, mysql, generic logs) that contain no mission telemetry, wasting tool calls and confusing the LLM with irrelevant results
+22. **Alert-triggered workflows use `event.*` namespace** — When a workflow has `type: alert` trigger and is invoked by the `.workflows` system connector, the alert context is available via the `event.*` namespace: `event.rule.name`, `event.rule.tags[0]`, `event.rule.tags[1]`, `event.alerts[0].kibana.alert.*`, `event.spaceId`. This is NOT `inputs.*` — the `event.*` namespace is the raw alert context document
+23. **`inputs.*` from alert connector resolves BLANK everywhere** — When an alert rule fires a workflow via the `.workflows` connector with `subActionParams.inputs`, those inputs resolve to **empty strings** in ALL workflow step contexts: `elasticsearch.search` query fields, `console` messages, `email` subject/message/to, `http` body, etc. Do NOT rely on `inputs.*` in alert-triggered workflows. Use `event.*` namespace instead (e.g., `event.rule.tags[1]` for error type, `event.rule.name` for rule name)
+24. **Having an `inputs:` schema may block alert context** — If an alert-triggered workflow defines an `inputs:` schema, it may filter/block the raw alert context document. For workflows that only need alert context (not manual inputs), remove the `inputs:` block entirely and use only `event.*` for all data access
+25. **Workflow `if` conditions use KQL dot paths, NOT `{{ }}` templates** — The `condition` field in workflow steps uses KQL syntax with literal dot paths as field names. **CORRECT:** `condition: "inputs.severity : critical"`. **WRONG:** `condition: "{{ inputs.severity }} : critical"` (template substitution replaces the value, then KQL interprets the value as a field name → always false). For array access in conditions, use `.0.` instead of `[0]`: `condition: "steps.set_data.output.var.0.email : *@*"`
+26. **`elasticsearch.search` schema — `aggs`, `_source`, `sort`, `exists` all NOT allowed** — The workflow schema for `elasticsearch.search` steps only allows `index`, `size`, and `query` in the `with` block. Including `sort` → `Valid: false`. Including `aggs` → validation warnings. Including `_source` → rejected. Including `exists` query → `Valid: false`. **Workarounds:** Use `size: 0` + `hits.total.value` instead of `aggs` for counts. Use small `size` instead of `_source` filtering. Use wide time ranges (`now-30m`) to compensate for lack of `sort`. Use `must_not` + `match` instead of `exists`
+27. **`Elastic-Cloud-SMTP` system email connector** — Pre-configured email connector on Elastic Cloud serverless. Use `connector-id: Elastic-Cloud-SMTP` in email steps. Sends from `noreply@alerts.elastic.co`. Returns `{accepted: [...], rejected: [...], response: "250 2.0.0 Ok: queued"}`
+28. **Extracting callback_url from log `event_name`** — OTLP log attributes include `event_name` containing a JSON string like `{"callback_url": "http://...", "user_email": "user@example.com"}`. Since `attributes.event_name` is passthrough (not indexed), extract it from search hit `_source` using `data.set` with `json_parse` filter: `${{ steps.search.output.hits.hits[0]._source.event_name | json_parse }}`. Access parsed fields via `steps.set_step.output.var[0].parsed_field.callback_url`
+29. **Alert rule tags for workflow data passing** — Since `inputs.*` is blank in alert-triggered workflows, encode key data in alert rule tags. Example: `tags: ["nova7", "FuelPressureException"]` → access in workflow as `event.rule.tags[1]`. Keep tags minimal (prefix + error_type) for reliable array index access

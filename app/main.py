@@ -7,7 +7,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -142,7 +142,9 @@ async def chaos_trigger(body: dict):
     channel = int(body.get("channel", 0))
     mode = body.get("mode", "calibration")
     se_name = body.get("se_name", "")
-    result = chaos_controller.trigger(channel, mode, se_name)
+    callback_url = body.get("callback_url", "")
+    user_email = body.get("user_email", "")
+    result = chaos_controller.trigger(channel, mode, se_name, callback_url, user_email)
     if dashboard_ws:
         await dashboard_ws.broadcast_status(chaos_controller, service_manager)
     return result
@@ -219,6 +221,29 @@ async def remediate_channel(channel: int):
     if dashboard_ws:
         await dashboard_ws.broadcast_status(chaos_controller, service_manager)
     return {"action": "remediated", "channel": channel, **result}
+
+
+# ── User Info (for auto-populating email) ─────────────────────────────────
+
+
+@app.get("/api/user/info")
+async def user_info(request: Request):
+    email = request.headers.get("X-Forwarded-User", "")
+    return {"email": email}
+
+
+# ── Email Notification endpoint (called by Elastic Workflow) ──────────────
+
+
+@app.post("/api/notify/email")
+async def notify_email(body: dict):
+    from app.notify.email_handler import send_email
+
+    to = body.get("to", "")
+    subject = body.get("subject", "")
+    message = body.get("body", "")
+    result = await send_email(to, subject, message)
+    return result
 
 
 # ── Run ─────────────────────────────────────────────────────────────────────

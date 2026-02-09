@@ -132,6 +132,7 @@ class OTLPClient:
         attributes: dict[str, Any] | None = None,
         trace_id: str | None = None,
         span_id: str | None = None,
+        event_name: str | None = None,
     ) -> dict[str, Any]:
         """Build a single OTLP log record."""
         record: dict[str, Any] = {
@@ -144,6 +145,8 @@ class OTLPClient:
             record["traceId"] = trace_id
         if span_id:
             record["spanId"] = span_id
+        if event_name:
+            record["eventName"] = event_name
         if attributes:
             record["attributes"] = _format_attributes(attributes)
         return record

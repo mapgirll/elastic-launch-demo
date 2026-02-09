@@ -2,74 +2,31 @@ version: "1"
 name: NOVA-7 Significant Event Notification
 description: >
   Notify launch operations team when a significant event is detected.
-  Searches recent OTLP logs for anomalies, invokes the AI agent for
-  root cause analysis, and logs the event to an audit index.
+  Triggered by alert rules — uses event.rule.tags[1] for the error_type
+  search, extracts user_email from event_name, and sends email notification.
 
 triggers:
-  - type: manual
-
-inputs:
-  - name: channel
-    type: number
-    required: true
-    description: "Fault channel number (1-20)"
-  - name: error_type
-    type: string
-    required: true
-    description: "Error type from the significant event"
-  - name: subsystem
-    type: string
-    required: true
-    description: "Affected subsystem name"
-  - name: severity
-    type: string
-    default: "medium"
-    description: "Severity level (critical, high, medium)"
+  - type: alert
 
 steps:
-  - name: classify_severity
-    type: if
-    condition: "{{ inputs.severity }} : critical"
-    steps:
-      - name: set_critical
-        type: data.set
-        with:
-          var:
-            - notification_level: "critical"
-            - color: "#FF0000"
-            - escalation_required: "true"
-    else:
-      - name: set_default
-        type: data.set
-        with:
-          var:
-            - notification_level: "{{ inputs.severity }}"
-            - color: "#FFD700"
-            - escalation_required: "false"
-
   - name: enrich_context
     type: elasticsearch.search
     with:
       index: "logs"
-      size: 2
-      _source:
-        - "body.text"
-        - "severity_text"
-        - "resource.attributes.service.name"
-        - "@timestamp"
+      size: 1
       query:
         bool:
           must:
             - match:
-                body.text: "{{ inputs.error_type }}"
+                body.text: "{{ event.rule.tags[1] }}"
             - term:
                 severity_text: "ERROR"
           filter:
             - range:
                 "@timestamp":
-                  gte: "now-5m"
+                  gte: "now-30m"
 
-  - name: check_cascade
+  - name: count_errors
     type: elasticsearch.search
     with:
       index: "logs"
@@ -79,58 +36,49 @@ steps:
           filter:
             - range:
                 "@timestamp":
-                  gte: "now-5m"
+                  gte: "now-15m"
             - term:
                 severity_text: "ERROR"
-      aggs:
-        affected_services:
-          terms:
-            field: "resource.attributes.service.name"
 
   - name: log_notification
     type: console
     with:
       message: >
-        NOVA-7 Significant Event - Channel {{ inputs.channel }}:
-        {{ inputs.error_type }} in {{ inputs.subsystem }}.
-        Severity: {{ inputs.severity }}.
+        NOVA-7 Significant Event — {{ event.rule.name }}.
+        Error type: {{ event.rule.tags[1] }}.
         Recent matches: {{ steps.enrich_context.output.hits.total.value }}.
-        Affected services: {{ steps.check_cascade.output.aggregations.affected_services.buckets | json }}.
+        Total errors: {{ steps.count_errors.output.hits.total.value }}.
 
-  - name: invoke_agent
-    type: ai.agent
-    agent-id: nova7-launch-anomaly-analyst
+  - name: parse_event_meta
+    type: data.set
     with:
+      var:
+        - event_meta: "${{ steps.enrich_context.output.hits.hits[0]._source.event_name | json_parse }}"
+
+  - name: send_notification
+    type: email
+    connector-id: Elastic-Cloud-SMTP
+    with:
+      to:
+        - "{{ steps.parse_event_meta.output.var[0].event_meta.user_email }}"
+      subject: "NOVA-7 Alert: {{ event.rule.name }}"
       message: >
-        Significant event on Channel {{ inputs.channel }}: {{ inputs.error_type }}
-        in {{ inputs.subsystem }} subsystem (severity: {{ inputs.severity }}).
-        Recent error count: {{ steps.enrich_context.output.hits.total.value }}.
-        Perform root cause analysis using your search tools.
-        If you identify the root cause with HIGH confidence, execute remediation.
+        Significant event detected in NOVA-7 mission:
 
-  - name: log_rca_result
-    type: console
-    with:
-      message: "AI RCA Result: {{ steps.invoke_agent.output | json }}"
+        Rule: {{ event.rule.name }}
+        Error Type: {{ event.rule.tags[1] }}
+        Recent matches: {{ steps.enrich_context.output.hits.total.value }}
+        Total errors (15m): {{ steps.count_errors.output.hits.total.value }}
 
-  - name: check_escalation
-    type: if
-    condition: "{{ inputs.severity }} : critical"
-    steps:
-      - name: escalation_notice
-        type: console
-        with:
-          message: "ESCALATION REQUIRED: Channel {{ inputs.channel }} - {{ inputs.error_type }} at CRITICAL severity. Paging launch director."
+        Open Kibana Agent Builder to investigate and request remediation.
 
   - name: audit_log
     type: elasticsearch.index
     with:
       index: "nova7-significant-events-audit"
       document:
-        channel: "{{ inputs.channel }}"
-        error_type: "{{ inputs.error_type }}"
-        subsystem: "{{ inputs.subsystem }}"
-        severity: "{{ inputs.severity }}"
-        cascade_services: "{{ steps.check_cascade.output.aggregations.affected_services.buckets | json }}"
+        rule_name: "{{ event.rule.name }}"
+        error_type: "{{ event.rule.tags[1] }}"
+        total_errors: "{{ steps.count_errors.output.hits.total.value }}"
         mission_id: "NOVA-7"
       refresh: wait_for

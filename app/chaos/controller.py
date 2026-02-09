@@ -30,9 +30,18 @@ class ChaosController:
                 "se_name": None,
                 "triggered_at": None,
                 "resolved_at": None,
+                "callback_url": "",
+                "user_email": "",
             }
 
-    def trigger(self, channel: int, mode: str = "calibration", se_name: str = "") -> dict[str, Any]:
+    def trigger(
+        self,
+        channel: int,
+        mode: str = "calibration",
+        se_name: str = "",
+        callback_url: str = "",
+        user_email: str = "",
+    ) -> dict[str, Any]:
         if channel not in CHANNEL_REGISTRY:
             return {"error": f"Unknown channel {channel}"}
 
@@ -46,6 +55,8 @@ class ChaosController:
             ch["se_name"] = se_name
             ch["triggered_at"] = time.time()
             ch["resolved_at"] = None
+            ch["callback_url"] = callback_url
+            ch["user_email"] = user_email
 
         ch_def = CHANNEL_REGISTRY[channel]
         logger.info(
@@ -73,6 +84,8 @@ class ChaosController:
             ch["state"] = STANDBY
             ch["mode"] = None
             ch["resolved_at"] = time.time()
+            ch["callback_url"] = ""
+            ch["user_email"] = ""
 
         ch_def = CHANNEL_REGISTRY[channel]
         logger.info("CHAOS: Channel %d [%s] RESOLVED", channel, ch_def["name"])
@@ -118,12 +131,25 @@ class ChaosController:
                 "se_name": ch_state["se_name"],
                 "triggered_at": ch_state["triggered_at"],
                 "resolved_at": ch_state["resolved_at"],
+                "callback_url": ch_state.get("callback_url", ""),
+                "user_email": ch_state.get("user_email", ""),
                 "affected_services": ch_def["affected_services"],
                 "cascade_services": ch_def["cascade_services"],
                 "error_type": ch_def["error_type"],
                 "sensor_type": ch_def["sensor_type"],
                 "vehicle_section": ch_def["vehicle_section"],
                 "description": ch_def["description"],
+            }
+
+    def get_channel_metadata(self, channel: int) -> dict[str, str]:
+        """Return callback_url and user_email for a channel."""
+        with self._lock:
+            ch = self._channels.get(channel)
+            if ch is None:
+                return {"callback_url": "", "user_email": ""}
+            return {
+                "callback_url": ch.get("callback_url", ""),
+                "user_email": ch.get("user_email", ""),
             }
 
     def get_active_channels(self) -> list[int]:

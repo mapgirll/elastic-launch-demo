@@ -186,6 +186,63 @@ body {
     accent-color: var(--nominal);
 }
 
+/* ── Notification Settings ──────────────────────────── */
+.notification-settings {
+    margin-bottom: 24px;
+}
+
+.notification-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 12px;
+}
+
+.email-label {
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: var(--text-secondary);
+}
+
+.email-input {
+    width: 100%;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    padding: 10px 14px;
+    border-radius: 4px;
+}
+
+.email-input:focus {
+    outline: none;
+    border-color: var(--nominal);
+}
+
+.email-input::placeholder {
+    color: var(--text-dim);
+}
+
+.toggle-option {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    font-size: 12px;
+    cursor: pointer;
+    color: var(--text-secondary);
+    transition: color 0.2s;
+}
+
+.toggle-option:hover {
+    color: var(--text-primary);
+}
+
+.toggle-option input[type="checkbox"] {
+    accent-color: var(--nominal);
+}
+
 /* ── Action Buttons ─────────────────────────────────── */
 .action-buttons {
     display: grid;

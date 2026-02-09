@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 #
-# setup-alerting.sh — Create NOVA-7 alert rules with webhook connector
+# setup-alerting.sh — Create NOVA-7 alert rules using native Workflows connector
 # targeting the Significant Event Notification workflow.
 #
 # Creates:
-#   1. A webhook connector pointing to the workflow run endpoint
-#   2. 20 alert rules (one per fault channel) using .es-query rule type
+#   1. 20 alert rules (one per fault channel) using .es-query rule type
+#   2. Each rule uses the built-in system-connector-.workflows action
 #
 # API reference:
-#   POST /api/actions/connector          — Create connector
 #   POST /api/alerting/rule              — Create alert rule
 #   GET  /api/alerting/rules/_find       — List alert rules
 #   DELETE /api/alerting/rule/{id}       — Delete alert rule
@@ -111,10 +110,9 @@ fi
 log_ok "Workflow ID: ${WORKFLOW_ID}"
 echo ""
 
-# ── Step 2: Clean old NOVA-7 connectors & create webhook connector ───────────
-log_info "--- Step 2: Clean old NOVA-7 connectors ---"
+# ── Step 2: Clean old NOVA-7 webhook connectors ──────────────────────────────
+log_info "--- Step 2: Clean old NOVA-7 webhook connectors ---"
 
-# Delete any existing NOVA-7 connectors to avoid duplicates
 old_deleted=0
 if connectors_out=$(kb_request GET "/api/actions/connectors" 2>/dev/null); then
     old_connector_ids=$(echo "$connectors_out" | python3 -c "
@@ -122,7 +120,7 @@ import sys, json
 try:
     data = json.load(sys.stdin)
     for c in data:
-        if 'NOVA-7' in c.get('name', ''):
+        if 'NOVA-7' in c.get('name', '') and c.get('connector_type_id') == '.webhook':
             print(c['id'])
 except:
     pass
@@ -138,55 +136,12 @@ except:
 fi
 
 if [[ "$old_deleted" -gt 0 ]]; then
-    log_ok "Deleted $old_deleted existing NOVA-7 connector(s)."
+    log_ok "Deleted $old_deleted old NOVA-7 webhook connector(s)."
 else
-    log_info "No existing NOVA-7 connectors to clean."
+    log_info "No old NOVA-7 webhook connectors to clean."
 fi
 
-log_info "Creating webhook connector..."
-
-CONNECTOR_BODY=$(python3 -c "
-import json
-body = {
-    'connector_type_id': '.webhook',
-    'name': 'NOVA-7 Significant Event Workflow',
-    'config': {
-        'url': '${KIBANA_URL}/api/workflows/${WORKFLOW_ID}/run',
-        'method': 'post',
-        'headers': {
-            'Content-Type': 'application/json',
-            'kbn-xsrf': 'true',
-            'x-elastic-internal-origin': 'kibana'
-        },
-        'hasAuth': True
-    },
-    'secrets': {
-        'user': 'elastic',
-        'password': '${ELASTIC_API_KEY}'
-    }
-}
-print(json.dumps(body))
-")
-
-CONNECTOR_ID=""
-
-if connector_result=$(kb_request POST "/api/actions/connector" "$CONNECTOR_BODY" 2>&1); then
-    CONNECTOR_ID=$(echo "$connector_result" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    print(data.get('id', ''))
-except:
-    pass
-" 2>/dev/null || true)
-fi
-
-if [[ -z "$CONNECTOR_ID" ]]; then
-    log_error "Failed to create webhook connector."
-    exit 1
-fi
-
-log_ok "Connector ID: ${CONNECTOR_ID}"
+log_ok "Using native Workflows system connector: system-connector-.workflows"
 echo ""
 
 # ── Step 3: Clean existing nova7-alert-* rules ───────────────────────────────
@@ -238,7 +193,7 @@ fi
 echo ""
 
 # ── Step 4: Create 20 alert rules ────────────────────────────────────────────
-log_info "--- Step 4: Create alert rules ---"
+log_info "--- Step 4: Create alert rules (native Workflows connector) ---"
 
 # Channel data: NUM|NAME|SUBSYSTEM|ERROR_TYPE|SENSOR_TYPE|VEHICLE_SECTION
 CHANNELS=(
@@ -291,7 +246,7 @@ error_type = '${error_type}'
 sensor_type = '${sensor_type}'
 vehicle_section = '${vehicle_section}'
 severity = '${severity}'
-connector_id = '${CONNECTOR_ID}'
+workflow_id = '${WORKFLOW_ID}'
 channel_int = int(num)
 
 es_query = json.dumps({
@@ -306,18 +261,11 @@ es_query = json.dumps({
     }
 })
 
-action_body = json.dumps({
-    'channel': channel_int,
-    'error_type': error_type,
-    'subsystem': subsystem,
-    'severity': severity
-})
-
 rule = {
     'name': f'NOVA-7 CH{num}: {name}',
     'rule_type_id': '.es-query',
     'consumer': 'alerts',
-    'tags': ['nova7', f'ch{num}', subsystem],
+    'tags': ['nova7', error_type],
     'schedule': {'interval': '1m'},
     'params': {
         'searchType': 'esQuery',
@@ -332,14 +280,23 @@ rule = {
     },
     'actions': [{
         'group': 'query matched',
-        'id': connector_id,
+        'id': 'system-connector-.workflows',
         'frequency': {
             'summary': False,
             'notify_when': 'onActiveAlert',
             'throttle': None
         },
         'params': {
-            'body': action_body
+            'subAction': 'run',
+            'subActionParams': {
+                'workflowId': workflow_id,
+                'inputs': {
+                    'channel': channel_int,
+                    'error_type': error_type,
+                    'subsystem': subsystem,
+                    'severity': severity
+                }
+            }
         }
     }]
 }
@@ -375,12 +332,38 @@ except:
     print('0')
 " 2>/dev/null || echo "0")
 
+    # Also verify connector type
+    wf_action_count=$(echo "$verify_out" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    rules = data.get('data', [])
+    count = 0
+    for r in rules:
+        if r.get('name', '').startswith('NOVA-7 CH'):
+            for a in r.get('actions', []):
+                if a.get('connector_type_id') == '.workflows':
+                    count += 1
+                    break
+    print(count)
+except:
+    print('0')
+" 2>/dev/null || echo "0")
+
     if [[ "$rule_count" -ge 20 ]]; then
         log_ok "Verified: $rule_count NOVA-7 alert rules found."
     elif [[ "$rule_count" -gt 0 ]]; then
         log_warn "Only $rule_count NOVA-7 alert rules found (expected 20)."
     else
         log_warn "No NOVA-7 alert rules found in verification."
+    fi
+
+    if [[ "$wf_action_count" -ge 20 ]]; then
+        log_ok "Verified: $wf_action_count rules use native .workflows connector."
+    elif [[ "$wf_action_count" -gt 0 ]]; then
+        log_warn "Only $wf_action_count rules use .workflows connector (expected 20)."
+    else
+        log_warn "No rules using .workflows connector found."
     fi
 else
     log_warn "Could not verify alert rules."
@@ -389,7 +372,7 @@ fi
 echo ""
 log_info "=========================================="
 log_info "NOVA-7 Alerting setup complete."
-log_info "  Connector: ${CONNECTOR_ID}"
+log_info "  Connector: system-connector-.workflows (native)"
 log_info "  Workflow:  ${WORKFLOW_ID}"
 log_info "  Rules:     ${created} created"
 log_info "=========================================="

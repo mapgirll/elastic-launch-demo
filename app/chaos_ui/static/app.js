@@ -5,6 +5,28 @@
     let selectedChannel = null;
     let channelData = {};
 
+    // ── localStorage session isolation ──────────────────────
+    const LS_KEY = 'nova7_my_channels';
+
+    function getMyChannels() {
+        try {
+            return JSON.parse(localStorage.getItem(LS_KEY)) || [];
+        } catch { return []; }
+    }
+
+    function addMyChannel(ch) {
+        const chs = getMyChannels();
+        if (!chs.includes(ch)) {
+            chs.push(ch);
+            localStorage.setItem(LS_KEY, JSON.stringify(chs));
+        }
+    }
+
+    function removeMyChannel(ch) {
+        const chs = getMyChannels().filter(c => c !== ch);
+        localStorage.setItem(LS_KEY, JSON.stringify(chs));
+    }
+
     // ── Initialize ────────────────────────────────────────────
     function init() {
         fetchChannels();
@@ -40,6 +62,10 @@
                 if (selectedChannel && data[selectedChannel]) {
                     updateChannelInfo(selectedChannel, data[selectedChannel]);
                 }
+                // Cleanup: remove channels from localStorage that are no longer ACTIVE
+                const mine = getMyChannels();
+                const stale = mine.filter(ch => !data[ch] || data[ch].state !== 'ACTIVE');
+                stale.forEach(ch => removeMyChannel(ch));
             })
             .catch(() => { /* ignore */ });
     }
@@ -116,7 +142,10 @@
             }),
         })
             .then(r => r.json())
-            .then(() => fetchStatus())
+            .then(result => {
+                if (result.status === 'triggered') addMyChannel(selectedChannel);
+                fetchStatus();
+            })
             .catch(e => console.error('Trigger failed:', e));
     };
 
@@ -129,7 +158,10 @@
             body: JSON.stringify({ channel: selectedChannel }),
         })
             .then(r => r.json())
-            .then(() => fetchStatus())
+            .then(result => {
+                if (result.status === 'resolved') removeMyChannel(selectedChannel);
+                fetchStatus();
+            })
             .catch(e => console.error('Resolve failed:', e));
     };
 
@@ -140,7 +172,10 @@
             body: JSON.stringify({ channel: channel }),
         })
             .then(r => r.json())
-            .then(() => fetchStatus())
+            .then(result => {
+                if (result.status === 'resolved') removeMyChannel(channel);
+                fetchStatus();
+            })
             .catch(e => console.error('Resolve failed:', e));
     };
 

@@ -7,6 +7,20 @@
     let ws = null;
     let pollInterval = null;
 
+    // ── localStorage session isolation ──────────────────────
+    const LS_KEY = 'nova7_my_channels';
+
+    function getMyChannels() {
+        try {
+            return JSON.parse(localStorage.getItem(LS_KEY)) || [];
+        } catch { return []; }
+    }
+
+    function removeMyChannel(ch) {
+        const chs = getMyChannels().filter(c => c !== ch);
+        localStorage.setItem(LS_KEY, JSON.stringify(chs));
+    }
+
     // ── WebSocket Connection ──────────────────────────────────
     function connect() {
         ws = new WebSocket(wsUrl);
@@ -37,7 +51,7 @@
 
     function handleMessage(data) {
         if (data.type === 'status_update') {
-            updateServices(data.services || {});
+            updateServices(data.services || {}, data.chaos);
             updateCountdown(data.countdown || {});
         } else if (data.type === 'countdown') {
             updateCountdown(data);
@@ -47,16 +61,39 @@
     }
 
     // ── Service Status Updates ────────────────────────────────
-    function updateServices(services) {
+    function updateServices(services, chaosData) {
+        const myChannels = getMyChannels();
         let hasWarning = false;
         let hasCritical = false;
+
+        // Cleanup: remove stale channels from localStorage
+        if (chaosData && myChannels.length > 0) {
+            const stale = myChannels.filter(ch => !chaosData[ch] || chaosData[ch].state !== 'ACTIVE');
+            stale.forEach(ch => removeMyChannel(ch));
+        }
 
         for (const [name, info] of Object.entries(services)) {
             const card = document.getElementById('svc-' + name);
             if (!card) continue;
 
             const statusEl = card.querySelector('.svc-status');
-            const status = info.status || 'NOMINAL';
+
+            // Re-derive status based on session's channels
+            let status;
+            if (myChannels.length === 0) {
+                // No channels triggered in this session → all nominal
+                status = 'NOMINAL';
+            } else {
+                const myActive = (info.active_faults || []).filter(f => myChannels.includes(f));
+                const myCascade = (info.cascade_faults || []).filter(f => myChannels.includes(f));
+                if (myActive.length > 0) {
+                    status = 'CRITICAL';
+                } else if (myCascade.length > 0) {
+                    status = 'WARNING';
+                } else {
+                    status = 'NOMINAL';
+                }
+            }
 
             // Remove all status classes
             card.classList.remove('nominal', 'warning', 'critical');
@@ -133,7 +170,7 @@
         fetch('/api/status')
             .then(r => r.json())
             .then(data => {
-                updateServices(data.services || {});
+                updateServices(data.services || {}, data.chaos);
                 updateCountdown(data.countdown || {});
             })
             .catch(() => { /* ignore */ });

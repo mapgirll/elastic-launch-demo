@@ -96,6 +96,9 @@ echo ""
 log_info "Step 2: Workflow deployment (must run before Agent Builder for workflow IDs)..."
 echo ""
 
+# Tell setup-workflows.sh not to cascade into agent-builder/alerting (we handle ordering here)
+export NOVA7_CALLED_FROM_SETUP_ALL=1
+
 if [[ -x "$SCRIPT_DIR/setup-workflows.sh" ]]; then
     bash "$SCRIPT_DIR/setup-workflows.sh"
 else

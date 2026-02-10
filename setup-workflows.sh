@@ -188,3 +188,25 @@ echo ""
 log_info "=========================================="
 log_info "Workflow deployment complete."
 log_info "=========================================="
+
+# ── Cascade: re-run dependent scripts (workflow IDs may have changed) ────────
+# Skip when called from setup-all.sh (which handles ordering itself)
+if [[ -z "${NOVA7_CALLED_FROM_SETUP_ALL:-}" ]]; then
+    echo ""
+    log_info "Workflow IDs may have changed — cascading to dependent scripts..."
+    echo ""
+
+    if [[ -f "$SCRIPT_DIR/setup-agent-builder.sh" ]]; then
+        log_info "Re-running setup-agent-builder.sh (workflow tool references)..."
+        bash "$SCRIPT_DIR/setup-agent-builder.sh"
+        echo ""
+    fi
+
+    if [[ -f "$SCRIPT_DIR/setup-alerting.sh" ]]; then
+        log_info "Re-running setup-alerting.sh (alert workflow actions)..."
+        bash "$SCRIPT_DIR/setup-alerting.sh"
+        echo ""
+    fi
+
+    log_ok "Cascade complete — agent tools and alert rules updated with new workflow IDs."
+fi

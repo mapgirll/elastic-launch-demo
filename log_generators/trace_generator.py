@@ -19,7 +19,7 @@ import threading
 import time
 
 from app.telemetry import OTLPClient, _format_attributes, SCHEMA_URL
-from app.config import SERVICES
+from app.config import SERVICES, CHANNEL_REGISTRY
 
 logger = logging.getLogger("trace-generator")
 
@@ -165,10 +165,13 @@ def _build_resource(service_name: str) -> dict:
     }
 
 
-def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random) -> dict[str, list]:
+def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random,
+                    chaos_affected: set[str] | None = None) -> dict[str, list]:
     """Generate a single distributed trace across multiple services.
 
     Returns a dict mapping service_name -> list of spans for that service.
+    When chaos_affected is provided, those services get high error rates (70%)
+    and elevated latency; all others use a healthy 3% baseline.
     """
     trace_id = _gen_trace_id()
     spans_by_service: dict[str, list] = {}
@@ -181,15 +184,27 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random) -> 
     entry_service = rng.choice(entry_services)
     entry_endpoint, entry_method = rng.choice(ENTRY_ENDPOINTS[entry_service])
 
-    # Determine if this trace has errors
-    is_error_trace = rng.random() < 0.12
+    # Determine if this trace has errors — chaos-aware probability
+    if chaos_affected and entry_service in chaos_affected:
+        is_error_trace = rng.random() < 0.70
+    else:
+        is_error_trace = rng.random() < 0.03
+
     error_service = None
     if is_error_trace:
-        downstream = SERVICE_TOPOLOGY.get(entry_service, [])
-        if downstream:
-            error_service = rng.choice(downstream)[0]
+        # If entry service is affected by chaos, it is the error source
+        if chaos_affected and entry_service in chaos_affected:
+            error_service = entry_service
+        else:
+            downstream = SERVICE_TOPOLOGY.get(entry_service, [])
+            if downstream:
+                error_service = rng.choice(downstream)[0]
 
-    total_duration = rng.randint(50, 500)
+    # Latency: affected services get 200-2000ms, normal get 50-500ms
+    if chaos_affected and entry_service in chaos_affected:
+        total_duration = rng.randint(200, 2000)
+    else:
+        total_duration = rng.randint(50, 500)
 
     # Root SERVER span for the entry-point service
     root_span_id = _gen_span_id()
@@ -247,8 +262,15 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random) -> 
         selected_calls = rng.sample(downstream_calls, num_calls)
 
         for callee_service, callee_endpoint, callee_method in selected_calls:
-            call_duration = rng.randint(10, total_duration // 2)
-            is_this_error = is_error_trace and callee_service == error_service
+            # Chaos-aware: affected callee services get elevated latency + error chance
+            if chaos_affected and callee_service in chaos_affected:
+                call_duration = rng.randint(100, max(200, total_duration // 2))
+                callee_error = rng.random() < 0.70
+            else:
+                call_duration = rng.randint(10, max(20, total_duration // 2))
+                callee_error = False
+
+            is_this_error = (is_error_trace and callee_service == error_service) or callee_error
             call_status = STATUS_ERROR if is_this_error else STATUS_OK
             call_http_status = rng.choice([500, 502, 503, 504]) if is_this_error else 200
 
@@ -373,21 +395,29 @@ def _generate_trace(client: OTLPClient, resources: dict, rng: random.Random) -> 
 
 
 # ── Run loop (used by ServiceManager and standalone) ──────────────────────────
-def run(client: OTLPClient, stop_event: threading.Event) -> None:
+def run(client: OTLPClient, stop_event: threading.Event, chaos_controller=None) -> None:
     """Run trace generator loop until stop_event is set."""
     rng = random.Random()
     resources = {svc: _build_resource(svc) for svc in SERVICES}
     total_traces = 0
     total_spans = 0
 
-    logger.info("Trace generator started")
+    logger.info("Trace generator started (chaos_aware=%s)", chaos_controller is not None)
 
     while not stop_event.is_set():
+        # Build set of services affected by active chaos channels
+        chaos_affected: set[str] = set()
+        if chaos_controller:
+            for ch_id in chaos_controller.get_active_channels():
+                ch = CHANNEL_REGISTRY.get(ch_id)
+                if ch:
+                    chaos_affected.update(ch["affected_services"])
+
         num_traces = rng.randint(2, 5)
 
         batch_by_service: dict[str, list] = {}
         for _ in range(num_traces):
-            trace_spans = _generate_trace(client, resources, rng)
+            trace_spans = _generate_trace(client, resources, rng, chaos_affected or None)
             for svc, spans in trace_spans.items():
                 batch_by_service.setdefault(svc, []).extend(spans)
 

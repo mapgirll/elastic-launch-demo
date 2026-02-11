@@ -6,13 +6,38 @@ Produces by-value Lens panels using the formBased datasource format that matches
 the built-in [OTel] dashboards shipped with Kibana 9.4, including all required
 fields: ignoreGlobalFilters, incompleteColumns, sampling, adHocDataViews,
 internalReferences, legend, valueLabels.
+
+Layout (48-unit grid): Cloud \u2192 RED \u2192 USE \u2192 APM/Infra \u2192 Detail
+  Section 1 \u2014 Cloud Provider Overview (y=0..14):
+    y=0  h=2:  Cloud group labels (DASHBOARD_MARKDOWN)
+    y=2  h=6:  9 Service Health tiles (3 per cloud column)
+    y=8  h=6:  K8s tiles per cloud (Node CPU + Node Memory)
+  Section 2 \u2014 RED Metrics (y=14..34):
+    y=14 h=2:  Section header
+    y=16 h=6:  KPI tiles (P99/P50 latency, error rate, throughput)
+    y=22 h=12: Time series (P99 latency, error rate by service)
+  Section 3 \u2014 USE Metrics (y=34..54):
+    y=34 h=2:  Section header
+    y=36 h=6:  KPI tiles (CPU load, disk util, container restarts, net errors)
+    y=42 h=12: Time series (CPU load, disk util over time)
+  Section 4 \u2014 APM & Infrastructure (y=54..86):
+    y=54 h=2:  Section header
+    y=56 h=6:  KPI tiles (APM throughput, APM errors, NGINX, VPC)
+    y=62 h=12: Time series (APM errors by service, log volume)
+    y=74 h=12: Time series (NGINX rate, VPC flow)
+  Section 5 \u2014 Detail (y=86..112):
+    y=86  h=2:  Section header
+    y=88  h=12: Errors by Service bar, Service Health Heatmap
+    y=100 h=12: Node CPU Over Time by cluster, Pod Memory by service
 """
 
 import json
 import os
 import uuid
 
-DATA_VIEW_ID = "logs*"
+DATA_VIEW_ID_LOGS = "logs*"
+DATA_VIEW_ID_TRACES = "traces-*"
+DATA_VIEW_ID_METRICS = "metrics-*"
 DASHBOARD_ID = "nova7-exec-dashboard"
 
 
@@ -21,26 +46,31 @@ def uid():
     return str(uuid.uuid4())
 
 
-def make_ref(layer_id):
-    """Create a data view reference matching the OTel dashboard pattern."""
+# \u2500\u2500 Reference helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+def make_ref(data_view_id, layer_id):
+    """Create a data view reference for a given layer."""
     return {
-        "id": DATA_VIEW_ID,
+        "id": data_view_id,
         "name": f"indexpattern-datasource-layer-{layer_id}",
         "type": "index-pattern",
     }
 
 
-def make_layer(layer_id, column_order, columns):
+# \u2500\u2500 Layer / state / panel builders \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+def make_layer(layer_id, column_order, columns, index_pattern_id=None):
     """Build a formBased layer with all Kibana 9.4 required fields."""
-    return {
-        layer_id: {
-            "columnOrder": column_order,
-            "columns": columns,
-            "ignoreGlobalFilters": False,
-            "incompleteColumns": {},
-            "sampling": 1,
-        }
+    layer = {
+        "columnOrder": column_order,
+        "columns": columns,
+        "ignoreGlobalFilters": False,
+        "incompleteColumns": {},
+        "sampling": 1,
     }
+    if index_pattern_id:
+        layer["indexPatternId"] = index_pattern_id
+    return {layer_id: layer}
 
 
 def make_state(layers_dict, visualization, query="", filters=None):
@@ -50,7 +80,13 @@ def make_state(layers_dict, visualization, query="", filters=None):
         "datasourceStates": {
             "formBased": {
                 "layers": layers_dict,
-            }
+            },
+            "indexpattern": {
+                "layers": {},
+            },
+            "textBased": {
+                "layers": {},
+            },
         },
         "filters": filters or [],
         "internalReferences": [],
@@ -69,20 +105,23 @@ def make_panel(panel_id, grid, title, vis_type, state, references):
                 "title": title,
                 "type": "lens",
                 "visualizationType": vis_type,
+                "version": 2,
             },
-            "enhancements": {},
+            "enhancements": {"dynamicActions": {"events": []}},
+            "hidePanelTitles": False,
             "syncColors": False,
             "syncCursor": True,
             "syncTooltips": False,
         },
         "gridData": grid,
         "panelIndex": panel_id,
-        "title": title,
         "type": "lens",
     }
 
 
-def col_count(col_id, label="Count", kql_filter=None):
+# \u2500\u2500 Column helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+def col_count(label="Count", kql_filter=None):
     """Create a count column."""
     col = {
         "customLabel": True,
@@ -99,7 +138,7 @@ def col_count(col_id, label="Count", kql_filter=None):
     return col
 
 
-def col_unique_count(col_id, source_field, label="Unique"):
+def col_unique_count(source_field, label="Unique"):
     """Create a unique_count column."""
     return {
         "customLabel": True,
@@ -113,7 +152,7 @@ def col_unique_count(col_id, source_field, label="Unique"):
     }
 
 
-def col_date_histogram(col_id, interval="30s", label="@timestamp"):
+def col_date_histogram(interval="30s", label="@timestamp"):
     """Create a date_histogram column."""
     return {
         "customLabel": True,
@@ -127,7 +166,7 @@ def col_date_histogram(col_id, interval="30s", label="@timestamp"):
     }
 
 
-def col_terms(col_id, source_field, label, size=10, order_col_id=None):
+def col_terms(source_field, label, size=10, order_col_id=None):
     """Create a terms column."""
     params = {
         "size": size,
@@ -136,7 +175,7 @@ def col_terms(col_id, source_field, label, size=10, order_col_id=None):
         "missingBucket": False,
         "otherBucket": False,
     }
-    col = {
+    return {
         "customLabel": True,
         "dataType": "string",
         "isBucketed": True,
@@ -146,89 +185,603 @@ def col_terms(col_id, source_field, label, size=10, order_col_id=None):
         "scale": "ordinal",
         "sourceField": source_field,
     }
-    return col
 
 
-# ── Build panels ────────────────────────────────────────────────────────────
+def col_average(source_field, label="Average"):
+    """Create an average column for gauge metrics."""
+    return {
+        "customLabel": True,
+        "dataType": "number",
+        "isBucketed": False,
+        "label": label,
+        "operationType": "average",
+        "params": {"emptyAsNull": True},
+        "scale": "ratio",
+        "sourceField": source_field,
+    }
+
+
+def col_last_value(source_field, label="Last Value"):
+    """Create a last_value column for KPI tiles."""
+    return {
+        "customLabel": True,
+        "dataType": "number",
+        "isBucketed": False,
+        "label": label,
+        "operationType": "last_value",
+        "params": {"sortField": "@timestamp"},
+        "scale": "ratio",
+        "sourceField": source_field,
+    }
+
+
+def col_percentile(source_field, percentile, label):
+    """Create a percentile column."""
+    return {
+        "customLabel": True,
+        "dataType": "number",
+        "isBucketed": False,
+        "label": label,
+        "operationType": "percentile",
+        "params": {"percentile": percentile},
+        "scale": "ratio",
+        "sourceField": source_field,
+    }
+
+
+def col_max(source_field, label="Max"):
+    """Create a max column."""
+    return {
+        "customLabel": True,
+        "dataType": "number",
+        "isBucketed": False,
+        "label": label,
+        "operationType": "max",
+        "params": {"emptyAsNull": True},
+        "scale": "ratio",
+        "sourceField": source_field,
+    }
+
+
+def col_formula(formula, label):
+    """Create a formula column for computed metrics like error rate %."""
+    return {
+        "customLabel": True,
+        "dataType": "number",
+        "isBucketed": False,
+        "label": label,
+        "operationType": "formula",
+        "params": {
+            "formula": formula,
+            "isFormulaBroken": False,
+        },
+        "scale": "ratio",
+    }
+
+
+# \u2500\u2500 Service definitions by cloud \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+CLOUD_GROUPS = [
+    {
+        "label": "**AWS** us-east-1",
+        "services": ["mission-control", "fuel-system", "ground-systems"],
+        "x_start": 0,
+        "col_width": 15,
+        "cluster": "nova7-eks-cluster",
+    },
+    {
+        "label": "**GCP** us-central1",
+        "services": ["navigation", "comms-array", "payload-monitor"],
+        "x_start": 16,
+        "col_width": 16,
+        "cluster": "nova7-gke-cluster",
+    },
+    {
+        "label": "**Azure** eastus",
+        "services": ["sensor-validator", "telemetry-relay", "range-safety"],
+        "x_start": 33,
+        "col_width": 15,
+        "cluster": "nova7-aks-cluster",
+    },
+]
+
+TILE_WIDTH = 5  # each service tile within a cloud column
+
+
+# \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+# Build panels
+# \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 
 panels = []
 
-# ── p1: Error Rate (lnsMetric) ──────────────────────────────────────────────
+# \u2500\u2500 Section 1: Cloud Provider Overview \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+# Row 0 (y=0, h=2): Cloud Provider Labels (DASHBOARD_MARKDOWN)
+for idx, group in enumerate(CLOUD_GROUPS):
+    pid = f"p_label_{idx}"
+    panels.append({
+        "type": "DASHBOARD_MARKDOWN",
+        "embeddableConfig": {
+            "content": group["label"],
+        },
+        "panelIndex": pid,
+        "gridData": {"h": 2, "i": pid, "w": group["col_width"], "x": group["x_start"], "y": 0},
+    })
+
+# Vertical separators between cloud columns
+for sep_x in [15, 32]:
+    pid = f"p_sep_{sep_x}"
+    panels.append({
+        "type": "DASHBOARD_MARKDOWN",
+        "embeddableConfig": {
+            "content": "",
+        },
+        "panelIndex": pid,
+        "gridData": {"h": 14, "i": pid, "w": 1, "x": sep_x, "y": 0},
+    })
+
+# Row 1 (y=2, h=6): 9 Service Health Tiles
+tile_idx = 0
+for group in CLOUD_GROUPS:
+    for svc_offset, svc_name in enumerate(group["services"]):
+        tile_idx += 1
+        pid = f"p_svc_{tile_idx}"
+        lid = uid()
+        cid = uid()
+        kql = f'resource.attributes.service.name: "{svc_name}" AND status.code: Error'
+        columns = {cid: col_count(label="Errors", kql_filter=kql)}
+        layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+        state = make_state(layer, {
+            "layerId": lid,
+            "layerType": "data",
+            "metricAccessor": cid,
+            "color": "#54B399",
+            "subtitle": svc_name,
+        })
+        x = group["x_start"] + svc_offset * TILE_WIDTH
+        # Last tile in group may need extra width to fill the column
+        w = TILE_WIDTH if svc_offset < 2 else (group["col_width"] - 2 * TILE_WIDTH)
+        panels.append(make_panel(
+            pid,
+            {"h": 6, "i": pid, "w": w, "x": x, "y": 2},
+            svc_name,
+            "lnsMetric",
+            state,
+            [make_ref(DATA_VIEW_ID_TRACES, lid)],
+        ))
+
+# Row 2 (y=8, h=6): K8s Tiles per Cloud Region
+# Two metric tiles per cloud column (Node CPU + Node Memory).
+k8s_tile_idx = 0
+for group in CLOUD_GROUPS:
+    x_base = group["x_start"]
+
+    col_w = group["col_width"]
+    left_w = col_w // 2
+    right_w = col_w - left_w
+
+    # Node CPU tile (left half of column)
+    k8s_tile_idx += 1
+    pid = f"p_k8s_{k8s_tile_idx}"
+    lid = uid()
+    cid = uid()
+    columns = {cid: col_average("metrics.k8s.node.cpu.utilization", label="CPU %")}
+    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
+    state = make_state(layer, {
+        "layerId": lid,
+        "layerType": "data",
+        "metricAccessor": cid,
+        "color": "#54B399",
+        "subtitle": "Node CPU",
+    })
+    panels.append(make_panel(pid,
+        {"h": 6, "i": pid, "w": left_w, "x": x_base, "y": 8},
+        f"Node CPU", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+
+    # Node Memory tile (right half of column)
+    k8s_tile_idx += 1
+    pid = f"p_k8s_{k8s_tile_idx}"
+    lid = uid()
+    cid = uid()
+    columns = {cid: col_average("metrics.k8s.node.memory.utilization", label="Mem %")}
+    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
+    state = make_state(layer, {
+        "layerId": lid,
+        "layerType": "data",
+        "metricAccessor": cid,
+        "color": "#6092C0",
+        "subtitle": "Node Memory",
+    })
+    panels.append(make_panel(pid,
+        {"h": 6, "i": pid, "w": right_w, "x": x_base + left_w, "y": 8},
+        f"Node Memory", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+
+# \u2500\u2500 Section 2 (y=14): RED Metrics \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+# RED section header
+panels.append({
+    "type": "DASHBOARD_MARKDOWN",
+    "embeddableConfig": {
+        "content": "**RED Metrics** Rate \u00b7 Errors \u00b7 Duration",
+    },
+    "panelIndex": "p_red_label",
+    "gridData": {"h": 2, "i": "p_red_label", "w": 48, "x": 0, "y": 14},
+})
+
+# p30: P99 Latency
 lid = uid()
 cid = uid()
-columns = {cid: col_count(cid, label="Error Rate", kql_filter="severity_text: ERROR OR severity_text: FATAL")}
-layer = make_layer(lid, [cid], columns)
+columns = {cid: col_percentile("duration", 99, "P99 Latency")}
+layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+state = make_state(layer, {
+    "layerId": lid,
+    "layerType": "data",
+    "metricAccessor": cid,
+    "color": "#D36086",
+    "subtitle": "nanoseconds",
+})
+panels.append(make_panel("p30",
+    {"h": 6, "i": "p30", "w": 12, "x": 0, "y": 16},
+    "P99 Latency", "lnsMetric", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+
+# p31: P50 Latency
+lid = uid()
+cid = uid()
+columns = {cid: col_percentile("duration", 50, "P50 Latency")}
+layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+state = make_state(layer, {
+    "layerId": lid,
+    "layerType": "data",
+    "metricAccessor": cid,
+    "color": "#6092C0",
+    "subtitle": "nanoseconds",
+})
+panels.append(make_panel("p31",
+    {"h": 6, "i": "p31", "w": 12, "x": 12, "y": 16},
+    "P50 Latency", "lnsMetric", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+
+# p32: Error Rate
+lid = uid()
+cid = uid()
+columns = {cid: col_formula("count(kql='status.code: Error') / count()", "Error Rate")}
+layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
 state = make_state(layer, {
     "layerId": lid,
     "layerType": "data",
     "metricAccessor": cid,
     "color": "#E7664C",
-    "subtitle": "Errors / min",
+    "subtitle": "ratio",
 })
-panels.append(make_panel("p1",
-    {"h": 6, "i": "p1", "w": 12, "x": 0, "y": 0},
-    "Error Rate", "lnsMetric", state, [make_ref(lid)]))
+panels.append(make_panel("p32",
+    {"h": 6, "i": "p32", "w": 12, "x": 24, "y": 16},
+    "Error Rate", "lnsMetric", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
 
-# ── p2: Log Volume (lnsMetric) ──────────────────────────────────────────────
+# p33: Throughput
 lid = uid()
 cid = uid()
-columns = {cid: col_count(cid, label="Log Volume")}
-layer = make_layer(lid, [cid], columns)
+columns = {cid: col_count(label="Throughput")}
+layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
 state = make_state(layer, {
     "layerId": lid,
     "layerType": "data",
     "metricAccessor": cid,
     "color": "#54B399",
-    "subtitle": "Total log volume",
+    "subtitle": "spans",
 })
-panels.append(make_panel("p2",
-    {"h": 6, "i": "p2", "w": 12, "x": 12, "y": 0},
-    "Log Volume", "lnsMetric", state, [make_ref(lid)]))
+panels.append(make_panel("p33",
+    {"h": 6, "i": "p33", "w": 12, "x": 36, "y": 16},
+    "Throughput", "lnsMetric", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
 
-# ── p3: Active Services (lnsMetric) ─────────────────────────────────────────
+# p34: P99 Latency Over Time (area, split by service)
+lid = uid()
+cid_x = uid()
+cid_y = uid()
+cid_split = uid()
+columns = {
+    cid_x: col_date_histogram("30s"),
+    cid_y: col_percentile("duration", 99, "P99 Latency"),
+    cid_split: col_terms("resource.attributes.service.name", "Service", size=9, order_col_id=cid_y),
+}
+layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_TRACES)
+state = make_state(layer, {
+    "legend": {"isVisible": True, "position": "right"},
+    "valueLabels": "hide",
+    "fittingFunction": "None",
+    "preferredSeriesType": "area",
+    "layers": [{
+        "layerId": lid,
+        "layerType": "data",
+        "seriesType": "area",
+        "accessors": [cid_y],
+        "xAccessor": cid_x,
+        "splitAccessor": cid_split,
+    }],
+})
+panels.append(make_panel("p34",
+    {"h": 12, "i": "p34", "w": 24, "x": 0, "y": 22},
+    "P99 Latency Over Time", "lnsXY", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+
+# p35: Error Rate by Service (bar_stacked)
+lid = uid()
+cid_x = uid()
+cid_y = uid()
+cid_split = uid()
+columns = {
+    cid_x: col_date_histogram("30s"),
+    cid_y: col_formula("count(kql='status.code: Error') / count()", "Error Rate"),
+    cid_split: col_terms("resource.attributes.service.name", "Service", size=9),
+}
+layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_TRACES)
+state = make_state(layer, {
+    "legend": {"isVisible": True, "position": "right"},
+    "valueLabels": "hide",
+    "fittingFunction": "None",
+    "preferredSeriesType": "bar_stacked",
+    "layers": [{
+        "layerId": lid,
+        "layerType": "data",
+        "seriesType": "bar_stacked",
+        "accessors": [cid_y],
+        "xAccessor": cid_x,
+        "splitAccessor": cid_split,
+    }],
+})
+panels.append(make_panel("p35",
+    {"h": 12, "i": "p35", "w": 24, "x": 24, "y": 22},
+    "Error Rate by Service", "lnsXY", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+
+# \u2500\u2500 Section 3 (y=34): USE Metrics \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+# USE section header
+panels.append({
+    "type": "DASHBOARD_MARKDOWN",
+    "embeddableConfig": {
+        "content": "**USE Metrics** Utilization \u00b7 Saturation \u00b7 Errors",
+    },
+    "panelIndex": "p_use_label",
+    "gridData": {"h": 2, "i": "p_use_label", "w": 48, "x": 0, "y": 34},
+})
+
+# p36: CPU Load (1m)
 lid = uid()
 cid = uid()
-columns = {cid: col_unique_count(cid, "resource.attributes.service.name", label="Active Services")}
-layer = make_layer(lid, [cid], columns)
+columns = {cid: col_average("metrics.system.cpu.load_average.1m", label="CPU Load")}
+layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
 state = make_state(layer, {
     "layerId": lid,
     "layerType": "data",
     "metricAccessor": cid,
-    "color": "#6DCCB1",
-    "subtitle": "Distinct services reporting",
+    "color": "#D6BF57",
+    "subtitle": "1-min avg",
 })
-panels.append(make_panel("p3",
-    {"h": 6, "i": "p3", "w": 12, "x": 24, "y": 0},
-    "Active Services", "lnsMetric", state, [make_ref(lid)]))
+panels.append(make_panel("p36",
+    {"h": 6, "i": "p36", "w": 12, "x": 0, "y": 36},
+    "CPU Load (1m)", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
 
-# ── p4: Active Anomalies (lnsMetric) ────────────────────────────────────────
+# p37: Disk Utilization
 lid = uid()
 cid = uid()
-columns = {cid: col_count(cid, label="Active Anomalies", kql_filter="severity_text: ERROR")}
-layer = make_layer(lid, [cid], columns)
+columns = {cid: col_average("metrics.system.filesystem.utilization", label="Disk Util")}
+layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
 state = make_state(layer, {
     "layerId": lid,
     "layerType": "data",
     "metricAccessor": cid,
-    "color": "#DA8B45",
-    "subtitle": "ERROR-level events",
+    "color": "#6092C0",
+    "subtitle": "filesystem",
 })
-panels.append(make_panel("p4",
-    {"h": 6, "i": "p4", "w": 12, "x": 36, "y": 0},
-    "Active Anomalies", "lnsMetric", state, [make_ref(lid)]))
+panels.append(make_panel("p37",
+    {"h": 6, "i": "p37", "w": 12, "x": 12, "y": 36},
+    "Disk Utilization", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
 
-# ── p5: Log Volume Over Time (lnsXY area_stacked) ──────────────────────────
+# p38: Container Restarts
+lid = uid()
+cid = uid()
+columns = {cid: col_average("metrics.k8s.container.restarts", label="Restarts")}
+layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
+state = make_state(layer, {
+    "layerId": lid,
+    "layerType": "data",
+    "metricAccessor": cid,
+    "color": "#E7664C",
+    "subtitle": "container restarts",
+})
+panels.append(make_panel("p38",
+    {"h": 6, "i": "p38", "w": 12, "x": 24, "y": 36},
+    "Container Restarts", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+
+# p39: Network Errors
+lid = uid()
+cid = uid()
+columns = {cid: col_average("metrics.system.network.errors", label="Net Errors")}
+layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
+state = make_state(layer, {
+    "layerId": lid,
+    "layerType": "data",
+    "metricAccessor": cid,
+    "color": "#E7664C",
+    "subtitle": "network errors",
+})
+panels.append(make_panel("p39",
+    {"h": 6, "i": "p39", "w": 12, "x": 36, "y": 36},
+    "Network Errors", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+
+# p40: CPU Load Over Time (area, split by host)
+lid = uid()
+cid_x = uid()
+cid_y = uid()
+cid_split = uid()
+columns = {
+    cid_x: col_date_histogram("30s"),
+    cid_y: col_max("metrics.system.cpu.load_average.1m", label="CPU Load (1m)"),
+    cid_split: col_terms("host.name", "Host", size=5, order_col_id=cid_y),
+}
+layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_METRICS)
+state = make_state(layer, {
+    "legend": {"isVisible": True, "position": "right"},
+    "valueLabels": "hide",
+    "fittingFunction": "None",
+    "preferredSeriesType": "area",
+    "layers": [{
+        "layerId": lid,
+        "layerType": "data",
+        "seriesType": "area",
+        "accessors": [cid_y],
+        "xAccessor": cid_x,
+        "splitAccessor": cid_split,
+    }],
+}, query="data_stream.dataset: hostmetricsreceiver.otel")
+panels.append(make_panel("p40",
+    {"h": 12, "i": "p40", "w": 24, "x": 0, "y": 42},
+    "CPU Load Over Time", "lnsXY", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+
+# p41: Disk Utilization Over Time (area, split by host)
+lid = uid()
+cid_x = uid()
+cid_y = uid()
+cid_split = uid()
+columns = {
+    cid_x: col_date_histogram("30s"),
+    cid_y: col_max("metrics.system.filesystem.utilization", label="Disk Utilization"),
+    cid_split: col_terms("host.name", "Host", size=5, order_col_id=cid_y),
+}
+layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_METRICS)
+state = make_state(layer, {
+    "legend": {"isVisible": True, "position": "right"},
+    "valueLabels": "hide",
+    "fittingFunction": "None",
+    "preferredSeriesType": "area",
+    "layers": [{
+        "layerId": lid,
+        "layerType": "data",
+        "seriesType": "area",
+        "accessors": [cid_y],
+        "xAccessor": cid_x,
+        "splitAccessor": cid_split,
+    }],
+}, query="data_stream.dataset: hostmetricsreceiver.otel")
+panels.append(make_panel("p41",
+    {"h": 12, "i": "p41", "w": 24, "x": 24, "y": 42},
+    "Disk Utilization Over Time", "lnsXY", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+
+# \u2500\u2500 Section 4 (y=54): APM & Infrastructure \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+# APM & Infrastructure section header
+panels.append({
+    "type": "DASHBOARD_MARKDOWN",
+    "embeddableConfig": {
+        "content": "**APM & Infrastructure**",
+    },
+    "panelIndex": "p_apm_label",
+    "gridData": {"h": 2, "i": "p_apm_label", "w": 48, "x": 0, "y": 54},
+})
+
+# p10: APM Throughput
+lid = uid()
+cid = uid()
+columns = {cid: col_count(label="Transactions")}
+layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+state = make_state(layer, {
+    "layerId": lid,
+    "layerType": "data",
+    "metricAccessor": cid,
+    "color": "#54B399",
+    "subtitle": "APM transactions",
+})
+panels.append(make_panel("p10",
+    {"h": 6, "i": "p10", "w": 12, "x": 0, "y": 56},
+    "APM Throughput", "lnsMetric", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+
+# p11: APM Error Rate
+lid = uid()
+cid = uid()
+columns = {cid: col_count(label="Errors", kql_filter="status.code: Error")}
+layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+state = make_state(layer, {
+    "layerId": lid,
+    "layerType": "data",
+    "metricAccessor": cid,
+    "color": "#E7664C",
+    "subtitle": "APM errors",
+})
+panels.append(make_panel("p11",
+    {"h": 6, "i": "p11", "w": 12, "x": 12, "y": 56},
+    "APM Error Rate", "lnsMetric", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+
+# p12: NGINX Requests
+lid = uid()
+cid = uid()
+columns = {cid: col_count(label="Requests")}
+layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_LOGS)
+state = make_state(layer, {
+    "layerId": lid,
+    "layerType": "data",
+    "metricAccessor": cid,
+    "color": "#6092C0",
+    "subtitle": "NGINX requests",
+}, query="data_stream.dataset: nginx.access.otel")
+panels.append(make_panel("p12",
+    {"h": 6, "i": "p12", "w": 12, "x": 24, "y": 56},
+    "NGINX Requests", "lnsMetric", state, [make_ref(DATA_VIEW_ID_LOGS, lid)]))
+
+# p13: VPC Flow Volume
+lid = uid()
+cid = uid()
+columns = {cid: col_count(label="Flows")}
+layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_LOGS)
+state = make_state(layer, {
+    "layerId": lid,
+    "layerType": "data",
+    "metricAccessor": cid,
+    "color": "#54B399",
+    "subtitle": "VPC flow records",
+}, query='data_stream.dataset: "aws.vpcflow.otel" OR data_stream.dataset: "gcp.vpcflow.otel"')
+panels.append(make_panel("p13",
+    {"h": 6, "i": "p13", "w": 12, "x": 36, "y": 56},
+    "VPC Flow Volume", "lnsMetric", state, [make_ref(DATA_VIEW_ID_LOGS, lid)]))
+
+# p14: APM Errors Over Time by Service (bar_stacked)
+lid = uid()
+cid_x = uid()
+cid_y = uid()
+cid_split = uid()
+columns = {
+    cid_x: col_date_histogram("30s"),
+    cid_y: col_count(label="Errors"),
+    cid_split: col_terms("resource.attributes.service.name", "Service", size=9, order_col_id=cid_y),
+}
+layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_TRACES)
+state = make_state(layer, {
+    "legend": {"isVisible": True, "position": "right"},
+    "valueLabels": "hide",
+    "fittingFunction": "None",
+    "preferredSeriesType": "bar_stacked",
+    "layers": [{
+        "layerId": lid,
+        "layerType": "data",
+        "seriesType": "bar_stacked",
+        "accessors": [cid_y],
+        "xAccessor": cid_x,
+        "splitAccessor": cid_split,
+    }],
+}, query="status.code: Error")
+panels.append(make_panel("p14",
+    {"h": 12, "i": "p14", "w": 24, "x": 0, "y": 62},
+    "APM Errors Over Time by Service", "lnsXY", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+
+# p15: Log Volume Over Time (area_stacked)
 lid = uid()
 cid_x = uid()
 cid_y = uid()
 columns = {
-    cid_x: col_date_histogram(cid_x, "30s"),
-    cid_y: col_count(cid_y, label="Log count"),
+    cid_x: col_date_histogram("30s"),
+    cid_y: col_count(label="Log count"),
 }
-layer = make_layer(lid, [cid_x, cid_y], columns)
+layer = make_layer(lid, [cid_x, cid_y], columns, DATA_VIEW_ID_LOGS)
 state = make_state(layer, {
     "legend": {"isVisible": True, "position": "right"},
     "valueLabels": "hide",
+    "fittingFunction": "None",
     "preferredSeriesType": "area_stacked",
     "layers": [{
         "layerId": lid,
@@ -238,22 +791,90 @@ state = make_state(layer, {
         "xAccessor": cid_x,
     }],
 })
-panels.append(make_panel("p5",
-    {"h": 12, "i": "p5", "w": 24, "x": 0, "y": 6},
-    "Log Volume Over Time", "lnsXY", state, [make_ref(lid)]))
+panels.append(make_panel("p15",
+    {"h": 12, "i": "p15", "w": 24, "x": 24, "y": 62},
+    "Log Volume Over Time", "lnsXY", state, [make_ref(DATA_VIEW_ID_LOGS, lid)]))
 
-# ── p6: Errors by Subsystem (lnsXY bar_horizontal) ─────────────────────────
+# p16: NGINX Request Rate Over Time (area)
 lid = uid()
 cid_x = uid()
 cid_y = uid()
 columns = {
-    cid_x: col_terms(cid_x, "resource.attributes.service.name", "Service", size=10, order_col_id=cid_y),
-    cid_y: col_count(cid_y, label="Error Count", kql_filter="severity_text: ERROR"),
+    cid_x: col_date_histogram("30s"),
+    cid_y: col_count(label="Requests"),
 }
-layer = make_layer(lid, [cid_x, cid_y], columns)
+layer = make_layer(lid, [cid_x, cid_y], columns, DATA_VIEW_ID_LOGS)
 state = make_state(layer, {
     "legend": {"isVisible": True, "position": "right"},
     "valueLabels": "hide",
+    "fittingFunction": "None",
+    "preferredSeriesType": "area",
+    "layers": [{
+        "layerId": lid,
+        "layerType": "data",
+        "seriesType": "area",
+        "accessors": [cid_y],
+        "xAccessor": cid_x,
+    }],
+}, query="data_stream.dataset: nginx.access.otel")
+panels.append(make_panel("p16",
+    {"h": 12, "i": "p16", "w": 24, "x": 0, "y": 74},
+    "NGINX Request Rate", "lnsXY", state, [make_ref(DATA_VIEW_ID_LOGS, lid)]))
+
+# p17: VPC Flow Activity (bar_stacked, split by cloud provider)
+lid = uid()
+cid_x = uid()
+cid_y = uid()
+cid_split = uid()
+columns = {
+    cid_x: col_date_histogram("30s"),
+    cid_y: col_count(label="Flows"),
+    cid_split: col_terms("data_stream.dataset", "Dataset", size=5, order_col_id=cid_y),
+}
+layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_LOGS)
+state = make_state(layer, {
+    "legend": {"isVisible": True, "position": "right"},
+    "valueLabels": "hide",
+    "fittingFunction": "None",
+    "preferredSeriesType": "bar_stacked",
+    "layers": [{
+        "layerId": lid,
+        "layerType": "data",
+        "seriesType": "bar_stacked",
+        "accessors": [cid_y],
+        "xAccessor": cid_x,
+        "splitAccessor": cid_split,
+    }],
+}, query='data_stream.dataset: "aws.vpcflow.otel" OR data_stream.dataset: "gcp.vpcflow.otel"')
+panels.append(make_panel("p17",
+    {"h": 12, "i": "p17", "w": 24, "x": 24, "y": 74},
+    "VPC Flow Activity", "lnsXY", state, [make_ref(DATA_VIEW_ID_LOGS, lid)]))
+
+# \u2500\u2500 Section 5 (y=86): Detail \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+# Detail section header
+panels.append({
+    "type": "DASHBOARD_MARKDOWN",
+    "embeddableConfig": {
+        "content": "**Detail**",
+    },
+    "panelIndex": "p_detail_label",
+    "gridData": {"h": 2, "i": "p_detail_label", "w": 48, "x": 0, "y": 86},
+})
+
+# p18: Errors by Service (bar_horizontal) \u2014 from traces
+lid = uid()
+cid_x = uid()
+cid_y = uid()
+columns = {
+    cid_x: col_terms("resource.attributes.service.name", "Service", size=10, order_col_id=cid_y),
+    cid_y: col_count(label="Error Count", kql_filter="status.code: Error"),
+}
+layer = make_layer(lid, [cid_x, cid_y], columns, DATA_VIEW_ID_TRACES)
+state = make_state(layer, {
+    "legend": {"isVisible": True, "position": "right"},
+    "valueLabels": "hide",
+    "fittingFunction": "None",
     "preferredSeriesType": "bar_horizontal",
     "layers": [{
         "layerId": lid,
@@ -263,66 +884,21 @@ state = make_state(layer, {
         "xAccessor": cid_x,
     }],
 })
-panels.append(make_panel("p6",
-    {"h": 12, "i": "p6", "w": 24, "x": 24, "y": 6},
-    "Errors by Service", "lnsXY", state, [make_ref(lid)]))
+panels.append(make_panel("p18",
+    {"h": 12, "i": "p18", "w": 24, "x": 0, "y": 88},
+    "Errors by Service", "lnsXY", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
 
-# ── p7: Cloud Provider Distribution (lnsPie) ───────────────────────────────
-lid = uid()
-cid_group = uid()
-cid_metric = uid()
-columns = {
-    cid_group: col_terms(cid_group, "severity_text", "Severity", size=5, order_col_id=cid_metric),
-    cid_metric: col_count(cid_metric, label="Count"),
-}
-layer = make_layer(lid, [cid_group, cid_metric], columns)
-state = make_state(layer, {
-    "shape": "pie",
-    "layers": [{
-        "layerId": lid,
-        "layerType": "data",
-        "primaryGroups": [cid_group],
-        "metrics": [cid_metric],
-    }],
-})
-panels.append(make_panel("p7",
-    {"h": 12, "i": "p7", "w": 24, "x": 0, "y": 18},
-    "Severity Distribution", "lnsPie", state, [make_ref(lid)]))
-
-# ── p8: Top 10 Error Types (lnsDatatable) ──────────────────────────────────
-lid = uid()
-cid_terms = uid()
-cid_count = uid()
-columns = {
-    cid_terms: col_terms(cid_terms, "resource.attributes.service.name", "Service", size=10, order_col_id=cid_count),
-    cid_count: col_count(cid_count, label="Error Count", kql_filter="severity_text: ERROR"),
-}
-layer = make_layer(lid, [cid_terms, cid_count], columns)
-state = make_state(layer, {
-    "columns": [
-        {"columnId": cid_terms, "isTransposed": False, "isMetric": False},
-        {"columnId": cid_count, "isTransposed": False, "isMetric": True},
-    ],
-    "layerId": lid,
-    "layerType": "data",
-    "paging": {"enabled": True, "size": 10},
-    "sorting": None,
-})
-panels.append(make_panel("p8",
-    {"h": 12, "i": "p8", "w": 24, "x": 24, "y": 18},
-    "Top Services by Error Count", "lnsDatatable", state, [make_ref(lid)]))
-
-# ── p9: Service Health Matrix (lnsHeatmap) ──────────────────────────────────
+# p19: Service Health Heatmap \u2014 from traces
 lid = uid()
 cid_time = uid()
 cid_svc = uid()
 cid_val = uid()
 columns = {
-    cid_time: col_date_histogram(cid_time, "1m"),
-    cid_svc: col_terms(cid_svc, "resource.attributes.service.name", "Service", size=10, order_col_id=cid_val),
-    cid_val: col_count(cid_val, label="Error Count", kql_filter="severity_text: ERROR"),
+    cid_time: col_date_histogram("1m"),
+    cid_svc: col_terms("resource.attributes.service.name", "Service", size=10, order_col_id=cid_val),
+    cid_val: col_count(label="Error Count", kql_filter="status.code: Error"),
 }
-layer = make_layer(lid, [cid_time, cid_svc, cid_val], columns)
+layer = make_layer(lid, [cid_time, cid_svc, cid_val], columns, DATA_VIEW_ID_TRACES)
 state = make_state(layer, {
     "gridConfig": {"isCellLabelVisible": False},
     "shape": "heatmap",
@@ -333,75 +909,85 @@ state = make_state(layer, {
     "valueAccessor": cid_val,
     "legend": {"isVisible": True, "position": "right"},
 })
-panels.append(make_panel("p9",
-    {"h": 12, "i": "p9", "w": 48, "x": 0, "y": 30},
-    "Service Health Matrix", "lnsHeatmap", state, [make_ref(lid)]))
+panels.append(make_panel("p19",
+    {"h": 12, "i": "p19", "w": 24, "x": 24, "y": 88},
+    "Service Health Heatmap", "lnsHeatmap", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
 
-# ── p10: Nginx Request Rate (lnsXY area_stacked) ───────────────────────────
+# p24: Node CPU Over Time (area, split by cluster)
 lid = uid()
 cid_x = uid()
 cid_y = uid()
+cid_split = uid()
 columns = {
-    cid_x: col_date_histogram(cid_x, "30s"),
-    cid_y: col_count(cid_y, label="Requests"),
+    cid_x: col_date_histogram("30s"),
+    cid_y: col_average("metrics.k8s.node.cpu.utilization", label="CPU Utilization"),
+    cid_split: col_terms("resource.attributes.k8s.cluster.name", "Cluster", size=5, order_col_id=cid_y),
 }
-layer = make_layer(lid, [cid_x, cid_y], columns)
+layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_METRICS)
 state = make_state(layer, {
     "legend": {"isVisible": True, "position": "right"},
     "valueLabels": "hide",
-    "preferredSeriesType": "area_stacked",
+    "fittingFunction": "None",
+    "preferredSeriesType": "area",
     "layers": [{
         "layerId": lid,
         "layerType": "data",
-        "seriesType": "area_stacked",
+        "seriesType": "area",
         "accessors": [cid_y],
         "xAccessor": cid_x,
+        "splitAccessor": cid_split,
     }],
-}, query="data_stream.dataset: nginx.access.otel")
-panels.append(make_panel("p10",
-    {"h": 10, "i": "p10", "w": 24, "x": 0, "y": 42},
-    "Nginx Request Rate", "lnsXY", state, [make_ref(lid)]))
+})
+panels.append(make_panel("p24",
+    {"h": 12, "i": "p24", "w": 24, "x": 0, "y": 100},
+    "Node CPU Over Time", "lnsXY", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
 
-# ── p11: MySQL Slow Queries (lnsXY line) ────────────────────────────────────
+# p25: Pod Memory by Service (bar_stacked, split by service)
 lid = uid()
 cid_x = uid()
 cid_y = uid()
+cid_split = uid()
 columns = {
-    cid_x: col_date_histogram(cid_x, "30s"),
-    cid_y: col_count(cid_y, label="Slow Queries"),
+    cid_x: col_date_histogram("30s"),
+    cid_y: col_average("metrics.k8s.pod.memory.usage", label="Memory Usage"),
+    cid_split: col_terms("resource.attributes.service.name", "Service", size=10, order_col_id=cid_y),
 }
-layer = make_layer(lid, [cid_x, cid_y], columns)
+layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_METRICS)
 state = make_state(layer, {
     "legend": {"isVisible": True, "position": "right"},
     "valueLabels": "hide",
-    "preferredSeriesType": "line",
+    "fittingFunction": "None",
+    "preferredSeriesType": "bar_stacked",
     "layers": [{
         "layerId": lid,
         "layerType": "data",
-        "seriesType": "line",
+        "seriesType": "bar_stacked",
         "accessors": [cid_y],
         "xAccessor": cid_x,
+        "splitAccessor": cid_split,
     }],
-}, query="data_stream.dataset: mysql.slowlog.otel")
-panels.append(make_panel("p11",
-    {"h": 10, "i": "p11", "w": 24, "x": 24, "y": 42},
-    "MySQL Slow Queries", "lnsXY", state, [make_ref(lid)]))
+})
+panels.append(make_panel("p25",
+    {"h": 12, "i": "p25", "w": 24, "x": 24, "y": 100},
+    "Pod Memory by Service", "lnsXY", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
 
 
-# ── Collect all references from panels ──────────────────────────────────────
+# \u2500\u2500 Collect all references from panels \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 all_refs = []
 seen_ref_names = set()
 for panel in panels:
-    for ref in panel["embeddableConfig"]["attributes"]["references"]:
+    attrs = panel.get("embeddableConfig", {}).get("attributes", {})
+    refs = attrs.get("references", [])
+    for ref in refs:
         if ref["name"] not in seen_ref_names:
             all_refs.append(ref)
             seen_ref_names.add(ref["name"])
 
 
-# ── Build the dashboard saved object ───────────────────────────────────────
+# \u2500\u2500 Build the dashboard saved object \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 dashboard = {
     "attributes": {
-        "description": "Executive overview of NOVA-7 mission telemetry across all subsystems and cloud providers",
+        "description": "Executive overview of NOVA-7 mission telemetry \u2014 service health, APM, NGINX, VPC flows, K8s cluster health across AWS/GCP/Azure",
         "kibanaSavedObjectMeta": {
             "searchSourceJSON": json.dumps({
                 "query": {"language": "kuery", "query": ""},
@@ -423,7 +1009,7 @@ dashboard = {
     "typeMigrationVersion": "10.3.0",
 }
 
-# ── Write NDJSON ────────────────────────────────────────────────────────────
+# \u2500\u2500 Write NDJSON \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 output_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exec-dashboard.ndjson")
 with open(output_path, "w") as f:
     f.write(json.dumps(dashboard, separators=(",", ":")) + "\n")

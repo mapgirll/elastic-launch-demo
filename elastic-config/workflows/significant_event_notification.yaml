@@ -3,7 +3,9 @@ name: NOVA-7 Significant Event Notification
 description: >
   Notify launch operations team when a significant event is detected.
   Triggered by alert rules — uses event.rule.tags[1] for the error_type
-  search, extracts user_email from event_name, and sends email notification.
+  search, extracts user_email from event_name, sends email notification
+  immediately, then runs AI root cause analysis and creates a case with
+  RCA findings.
 
 triggers:
   - type: alert
@@ -25,14 +27,6 @@ steps:
         | STATS total_errors = COUNT(*)
       format: json
 
-  - name: log_notification
-    type: console
-    with:
-      message: >
-        NOVA-7 Significant Event — {{ event.rule.name }}.
-        Error type: {{ event.rule.tags[1] }}.
-        Total errors: {{ steps.count_errors.output.values[0][0] }}.
-
   - name: parse_event_meta
     type: data.set
     with:
@@ -53,7 +47,43 @@ steps:
         Error Type: {{ event.rule.tags[1] }}
         Total errors (15m): {{ steps.count_errors.output.values[0][0] }}
 
-        Open Kibana Agent Builder to investigate and request remediation.
+        An AI root cause analysis is underway — a case with detailed findings will be created shortly.
+
+        Open Kibana to investigate and request remediation.
+
+  - name: run_rca
+    type: ai.agent
+    agent-id: nova7-launch-anomaly-analyst
+    create-conversation: true
+    with:
+      message: >
+        Significant event detected: {{ event.rule.name }}.
+        Error type: {{ event.rule.tags[1] }}.
+        Total errors in last 15 minutes: {{ steps.count_errors.output.values[0][0] }}.
+        Perform a full root cause analysis. Search logs for this error type,
+        identify affected services, trace the fault propagation, and provide
+        your structured RCA report.
+
+  - name: create_case
+    type: kibana.createCaseDefaultSpace
+    with:
+      title: "NOVA-7 RCA: {{ event.rule.name }}"
+      description: |
+       [View Full Conversation]({{ kibanaUrl }}/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }})
+
+       {{ steps.run_rca.output.message }}
+      tags:
+        - "nova7"
+        - "{{ event.rule.tags[1] }}"
+      severity: "high"
+      owner: "observability"
+      settings:
+        syncAlerts: false
+      connector:
+        id: "none"
+        name: "none"
+        type: ".none"
+        fields: null
 
   - name: audit_log
     type: elasticsearch.index
@@ -63,5 +93,6 @@ steps:
         rule_name: "{{ event.rule.name }}"
         error_type: "{{ event.rule.tags[1] }}"
         total_errors: "{{ steps.count_errors.output.values[0][0] }}"
+        rca_case_created: true
         mission_id: "NOVA-7"
       refresh: wait_for

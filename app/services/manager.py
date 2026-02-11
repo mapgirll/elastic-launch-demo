@@ -68,7 +68,7 @@ class ServiceManager:
             svc.start()
         self._start_countdown_thread()
         self._start_generators()
-        logger.info("All %d services + 4 generators started", len(self.services))
+        logger.info("All %d services + 7 generators started", len(self.services))
 
     def stop_all(self) -> None:
         self._stop_event.set()
@@ -89,15 +89,22 @@ class ServiceManager:
         from log_generators.host_metrics_generator import run as run_metrics
         from log_generators.nginx_log_generator import run as run_nginx
         from log_generators.mysql_log_generator import run as run_mysql
+        from log_generators.k8s_metrics_generator import run as run_k8s
+        from log_generators.nginx_metrics_generator import run as run_nginx_metrics
+        from log_generators.vpc_flow_generator import run as run_vpc
 
-        for name, fn in [
-            ("gen-traces", run_traces),
-            ("gen-host-metrics", run_metrics),
-            ("gen-nginx", run_nginx),
-            ("gen-mysql", run_mysql),
-        ]:
+        generators = [
+            ("gen-traces", run_traces, (self.otlp, self._stop_event, self.chaos_controller)),
+            ("gen-host-metrics", run_metrics, (self.otlp, self._stop_event)),
+            ("gen-nginx", run_nginx, (self.otlp, self._stop_event)),
+            ("gen-mysql", run_mysql, (self.otlp, self._stop_event)),
+            ("gen-k8s-metrics", run_k8s, (self.otlp, self._stop_event)),
+            ("gen-nginx-metrics", run_nginx_metrics, (self.otlp, self._stop_event)),
+            ("gen-vpc-flow", run_vpc, (self.otlp, self._stop_event)),
+        ]
+        for name, fn, args in generators:
             t = threading.Thread(
-                target=fn, args=(self.otlp, self._stop_event),
+                target=fn, args=args,
                 name=name, daemon=True,
             )
             t.start()

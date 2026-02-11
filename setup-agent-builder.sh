@@ -150,7 +150,7 @@ create_tool "search_telemetry_logs" '{
   "type": "index_search",
   "description": "Search NOVA-7 telemetry logs for anomaly investigation. Searches the logs data stream which contains all OTLP telemetry. Supports filtering by error type (in body.text), sensor type, vehicle section, service name, severity, channel, and cloud provider. Primary investigation tool for root cause analysis.",
   "configuration": {
-    "pattern": "logs"
+    "pattern": "logs,logs.*"
   }
 }'
 
@@ -159,7 +159,7 @@ create_tool "search_subsystem_health" '{
   "type": "esql",
   "description": "Query health status of NOVA-7 services by aggregating recent telemetry. Returns error counts, warning counts, and overall health status for each of the 9 services (fuel-system, navigation, comms-array, mission-control, range-safety, ground-systems, payload-monitor, sensor-validator, telemetry-relay). Log message field: body.text (never use 'body' alone).",
   "configuration": {
-    "query": "FROM logs | WHERE @timestamp > NOW() - 15 MINUTES | STATS error_count = COUNT(*) WHERE severity_text == \"ERROR\", warn_count = COUNT(*) WHERE severity_text == \"WARN\", total = COUNT(*) BY service.name | SORT error_count DESC",
+    "query": "FROM logs,logs.* | WHERE @timestamp > NOW() - 15 MINUTES | STATS error_count = COUNT(*) WHERE severity_text == \"ERROR\", warn_count = COUNT(*) WHERE severity_text == \"WARN\", total = COUNT(*) BY service.name | SORT error_count DESC",
     "params": {}
   }
 }'
@@ -169,7 +169,7 @@ create_tool "check_service_status" '{
   "type": "esql",
   "description": "Check operational status of individual NOVA-7 microservices. Returns error counts, warning counts, and log totals for each of the 9 services (fuel-system, navigation, comms-array, mission-control, range-safety, ground-systems, payload-monitor, sensor-validator, telemetry-relay). Log message field: body.text (never use 'body' alone).",
   "configuration": {
-    "query": "FROM logs | WHERE @timestamp > NOW() - 15 MINUTES | STATS error_count = COUNT(*) WHERE severity_text == \"ERROR\", warn_count = COUNT(*) WHERE severity_text == \"WARN\", total = COUNT(*) BY service.name | SORT error_count DESC",
+    "query": "FROM logs,logs.* | WHERE @timestamp > NOW() - 15 MINUTES | STATS error_count = COUNT(*) WHERE severity_text == \"ERROR\", warn_count = COUNT(*) WHERE severity_text == \"WARN\", total = COUNT(*) BY service.name | SORT error_count DESC",
     "params": {}
   }
 }'
@@ -188,7 +188,7 @@ create_tool "trace_anomaly_propagation" '{
   "type": "esql",
   "description": "Trace the propagation path of anomalies across NOVA-7 services. Shows which services have errors and warnings over time to identify cascade chains and the temporal order of fault propagation. Log message field: body.text (never use 'body' alone).",
   "configuration": {
-    "query": "FROM logs | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text IN (\"ERROR\", \"WARN\") | STATS error_count = COUNT(*) WHERE severity_text == \"ERROR\", warn_count = COUNT(*) WHERE severity_text == \"WARN\" BY service.name | SORT error_count DESC",
+    "query": "FROM logs,logs.* | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text IN (\"ERROR\", \"WARN\") | STATS error_count = COUNT(*) WHERE severity_text == \"ERROR\", warn_count = COUNT(*) WHERE severity_text == \"WARN\" BY service.name | SORT error_count DESC",
     "params": {}
   }
 }'
@@ -198,7 +198,7 @@ create_tool "launch_safety_assessment" '{
   "type": "esql",
   "description": "Comprehensive launch safety assessment. Evaluates all critical NOVA-7 services against launch commit criteria. Checks for active errors including FTS anomalies (FTSCheckException), range safety tracking losses (TrackingLossException), and cascade warnings across services. Returns GO/NO-GO data. Log message field: body.text (never use 'body' alone).",
   "configuration": {
-    "query": "FROM logs | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text IN (\"ERROR\", \"WARN\") | STATS error_count = COUNT(*) WHERE severity_text == \"ERROR\", warn_count = COUNT(*) WHERE severity_text == \"WARN\" BY service.name | SORT error_count DESC",
+    "query": "FROM logs,logs.* | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text IN (\"ERROR\", \"WARN\") | STATS error_count = COUNT(*) WHERE severity_text == \"ERROR\", warn_count = COUNT(*) WHERE severity_text == \"WARN\" BY service.name | SORT error_count DESC",
     "params": {}
   }
 }'
@@ -206,9 +206,9 @@ create_tool "launch_safety_assessment" '{
 create_tool "esql_telemetry_query" '{
   "id": "esql_telemetry_query",
   "type": "esql",
-  "description": "Run custom ES|QL queries against NOVA-7 telemetry logs for advanced analytics, threshold validation, and anomaly detection. CRITICAL: The log message column is body.text (NOT body — using 'body' alone causes Unknown column errors). Available fields: @timestamp, body.text (log message), severity_text (INFO/WARN/ERROR), service.name (9 services), log.level. Use body.text LIKE \"*ErrorType*\" to match specific error types. Example: FROM logs | WHERE body.text LIKE \"*FuelPressureException*\" AND severity_text == \"ERROR\" | STATS count = COUNT(*)",
+  "description": "Run custom ES|QL queries against NOVA-7 telemetry logs for advanced analytics, threshold validation, and anomaly detection. CRITICAL: The log message column is body.text (NOT body — using 'body' alone causes Unknown column errors). Available fields: @timestamp, body.text (log message), severity_text (INFO/WARN/ERROR), service.name (9 services), log.level. Use body.text LIKE \"*ErrorType*\" to match specific error types. IMPORTANT: Always use FROM logs,logs.* to include all sub-streams. Example: FROM logs,logs.* | WHERE body.text LIKE \"*FuelPressureException*\" AND severity_text == \"ERROR\" | STATS count = COUNT(*)",
   "configuration": {
-    "query": "FROM logs | WHERE @timestamp > NOW() - 15 MINUTES | LIMIT 25",
+    "query": "FROM logs,logs.* | WHERE @timestamp > NOW() - 15 MINUTES | LIMIT 25",
     "params": {}
   }
 }'
@@ -315,18 +315,17 @@ agent = {
 print(json.dumps(agent))
 ")
 
+# DELETE + POST to reliably update (PUT truncates instructions)
+AGENT_ID=$(python3 -c "import json; print(json.load(open('$AGENT_FILE')).get('agent_id','nova7-launch-anomaly-analyst'))")
+log_info "Deleting existing agent (if any): ${AGENT_ID}"
+kb_request DELETE "/api/agent_builder/agents/${AGENT_ID}" > /dev/null 2>&1 || true
+
 log_info "Creating agent: NOVA-7 Launch Anomaly Analyst"
 if kb_request POST "/api/agent_builder/agents" "$AGENT_BODY" > /dev/null 2>&1; then
-    log_ok "Agent created successfully (with instructions/system prompt)."
+    log_ok "Agent created successfully (with full instructions/system prompt)."
 else
-    # Try updating existing agent via PUT
-    AGENT_ID=$(python3 -c "import json; print(json.load(open('$AGENT_FILE')).get('agent_id','nova7-launch-anomaly-analyst'))")
-    if kb_request PUT "/api/agent_builder/agents/${AGENT_ID}" "$AGENT_BODY" > /dev/null 2>&1; then
-        log_ok "Agent updated successfully."
-    else
-        log_warn "Failed to create/update agent."
-        log_info "Try via Agent Builder UI: ${KIBANA_URL}/app/agent_builder"
-    fi
+    log_warn "Failed to create agent."
+    log_info "Try via Agent Builder UI: ${KIBANA_URL}/app/agent_builder"
 fi
 echo ""
 

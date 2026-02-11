@@ -13,7 +13,8 @@
     "launch_safety_assessment",
     "esql_telemetry_query",
     "remediation_action",
-    "escalation_action"
+    "escalation_action",
+    "platform.core.cases"
   ],
   "knowledge_base": {
     "index": "nova7-knowledge-base",

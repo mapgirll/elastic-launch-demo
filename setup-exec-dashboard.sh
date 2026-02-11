@@ -43,13 +43,7 @@ echo ""
 # ── Ensure data view exists ──────────────────────────────────────────────────
 log_info "Ensuring 'logs*' data view exists..."
 
-# Delete old logs-* data view if it exists (avoid duplicates)
-curl -s -o /dev/null -w "" \
-    -X DELETE "${KIBANA_URL}/api/data_views/data_view/logs-*" \
-    -H "kbn-xsrf: true" \
-    -H "Authorization: ApiKey ${ELASTIC_API_KEY}" 2>/dev/null || true
-
-# Create or update the logs* data view
+# Create or update the logs* data view (does NOT touch the managed logs-* view)
 dv_response=$(curl -s -w "\n%{http_code}" \
     -X POST "${KIBANA_URL}/api/data_views/data_view" \
     -H "Content-Type: application/json" \
@@ -70,6 +64,32 @@ if [[ "$dv_code" -ge 200 && "$dv_code" -lt 300 ]]; then
     log_ok "Data view 'logs*' created/updated."
 else
     log_warn "Could not create data view (HTTP $dv_code). Dashboard may not load correctly."
+fi
+
+# ── Ensure traces-* data view exists ─────────────────────────────────────────
+log_info "Ensuring 'traces-*' data view exists..."
+
+# Create or update the traces-* data view
+tr_response=$(curl -s -w "\n%{http_code}" \
+    -X POST "${KIBANA_URL}/api/data_views/data_view" \
+    -H "Content-Type: application/json" \
+    -H "kbn-xsrf: true" \
+    -H "Authorization: ApiKey ${ELASTIC_API_KEY}" \
+    -d '{
+  "data_view": {
+    "id": "traces-*",
+    "title": "traces-*",
+    "name": "NOVA-7 Traces",
+    "timeFieldName": "@timestamp"
+  },
+  "override": true
+}')
+
+tr_code=$(echo "$tr_response" | tail -1)
+if [[ "$tr_code" -ge 200 && "$tr_code" -lt 300 ]]; then
+    log_ok "Data view 'traces-*' created/updated."
+else
+    log_warn "Could not create traces data view (HTTP $tr_code). APM panels may not load."
 fi
 
 echo ""

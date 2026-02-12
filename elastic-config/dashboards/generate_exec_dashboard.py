@@ -577,7 +577,7 @@ panels.append(make_panel("p37",
 # p38: Container Restarts
 lid = uid()
 cid = uid()
-columns = {cid: col_average("metrics.k8s.container.restarts", label="Restarts")}
+columns = {cid: col_max("metrics.k8s.container.restarts", label="Restarts")}
 layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
 state = make_state(layer, {
     "layerId": lid,
@@ -593,7 +593,7 @@ panels.append(make_panel("p38",
 # p39: Network Errors
 lid = uid()
 cid = uid()
-columns = {cid: col_average("metrics.system.network.errors", label="Net Errors")}
+columns = {cid: col_max("metrics.system.network.errors", label="Net Errors")}
 layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
 state = make_state(layer, {
     "layerId": lid,

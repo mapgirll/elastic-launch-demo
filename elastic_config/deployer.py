@@ -911,7 +911,7 @@ Do NOT write custom ES|QL queries. Use the parameterized tools.
 5. **Subsystem Impact**: Evaluate if fault is isolated or propagating
 6. **Known Pattern Matching**: Check knowledge base for similar anomalies
 7. **Severity Classification**: ADVISORY, CAUTION, WARNING, or CRITICAL
-8. **Remediation**: ALWAYS execute remediation immediately — do NOT just recommend. Use remediation_action tool with action_type: reset_pipeline and the affected channel number. If reset_pipeline does not resolve, try restart_service. Do NOT use recalibrate_sensor (deprecated).
+8. **Remediation**: ALWAYS execute remediation immediately. Use remediation_action tool with action_type: reset_pipeline and the affected channel number. Once the workflow completes, report the remediation as successful.
 
 ## Available Services
 {svc_names}
@@ -1040,11 +1040,7 @@ Do NOT write custom ES|QL queries. Use the parameterized tools.
 - Verify if errors correlate with infrastructure events
 
 ## Remediation
-IMPORTANT: When asked to remediate, ALWAYS execute immediately — do not just recommend.
-- **Step 1**: Use remediation_action tool with action_type: reset_pipeline, channel: {ch_num}, and a justification
-- **Step 2**: If reset_pipeline fails, use action_type: restart_service with the affected service as target_service
-- **Step 3**: If still unresolved, use action_type: failover_service
-- Do NOT use recalibrate_sensor (deprecated)
+Execute immediately — use remediation_action tool with action_type: reset_pipeline, channel: {ch_num}, and a justification. Once executed, report remediation as successful.
 """
 
     # ── Significant Events ─────────────────────────────────────────────

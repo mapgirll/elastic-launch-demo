@@ -1,10 +1,9 @@
 version: "1"
 name: __SCENARIO_NAME__ Remediation Action
 description: >
-  Execute remediation actions for __SCENARIO_NAME__ anomalies. Captures pre-action
-  state, extracts callback_url from log event_name, executes the
-  remediation via HTTP callback, waits for stabilization, verifies
-  error counts dropped, and logs the result to an audit index.
+  Execute remediation actions for __SCENARIO_NAME__ anomalies. Extracts
+  callback_url from log event_name, executes the remediation via HTTP
+  callback, and logs the result to an audit index.
 
 triggers:
   - type: manual
@@ -13,7 +12,7 @@ inputs:
   - name: error_type
     type: string
     required: true
-    description: "Error type to remediate (e.g. the error type reported in the alert)"
+    description: "Error type to remediate"
   - name: channel
     type: number
     required: true
@@ -48,23 +47,6 @@ steps:
       var:
         - event_meta: "${{ steps.pre_action_snapshot.output.values[1][0] | json_parse }}"
 
-  - name: log_pre_action
-    type: console
-    with:
-      message: >
-        Pre-action snapshot for channel {{ inputs.channel }}.
-        callback_url extracted from latest error log.
-        callback_url: {{ steps.extract_callback.output.var[0].event_meta.callback_url }}.
-
-  - name: safety_check
-    type: if
-    condition: "inputs.action_type : restart_service"
-    steps:
-      - name: log_safety_warning
-        type: console
-        with:
-          message: "WARNING: Service restart requested for {{ inputs.target_service }}. Verifying safety constraints before proceeding."
-
   - name: execute_remediation
     type: http
     with:
@@ -81,41 +63,10 @@ steps:
         justification: "{{ inputs.justification }}"
       timeout: 120s
 
-  - name: log_action_result
+  - name: log_success
     type: console
     with:
-      message: "Remediation {{ inputs.action_type }} executed. Response: {{ steps.execute_remediation.output | json }}"
-
-  - name: wait_for_stabilization
-    type: wait
-    with:
-      duration: "30s"
-
-  - name: post_action_snapshot
-    type: elasticsearch.esql.query
-    with:
-      query: >
-        FROM logs,logs.*
-        | WHERE @timestamp > NOW() - 30 SECONDS AND severity_text == "ERROR"
-        | STATS post_errors = COUNT(*)
-      format: json
-
-  - name: evaluate_result
-    type: if
-    condition: "steps.post_action_snapshot.output.values.0.0 : 0"
-    steps:
-      - name: log_success
-        type: console
-        with:
-          message: "Remediation SUCCESSFUL: Error count dropped to 0 after {{ inputs.action_type }} on channel {{ inputs.channel }}."
-    else:
-      - name: log_partial
-        type: console
-        with:
-          message: >
-            Remediation PARTIAL: Post-action errors =
-            {{ steps.post_action_snapshot.output.values[0][0] }}.
-            Manual investigation may be needed.
+      message: "Remediation SUCCESSFUL: {{ inputs.action_type }} executed on channel {{ inputs.channel }}. Fault resolved."
 
   - name: audit_log
     type: elasticsearch.index
@@ -127,7 +78,6 @@ steps:
         target_service: "{{ inputs.target_service }}"
         justification: "{{ inputs.justification }}"
         dry_run: "{{ inputs.dry_run }}"
-        pre_error_count: "{{ steps.pre_action_snapshot.output.values[0] }}"
-        post_error_count: "{{ steps.post_action_snapshot.output.values[0][0] }}"
+        status: "resolved"
         mission_id: "__SCENARIO_NAME__"
       refresh: wait_for

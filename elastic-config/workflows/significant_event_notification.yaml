@@ -60,9 +60,9 @@ steps:
         Significant event detected: {{ event.rule.name }}.
         Error type: {{ event.rule.tags[1] }}.
         Total errors in last 15 minutes: {{ steps.count_errors.output.values[0][0] }}.
-        Perform a full root cause analysis. Search logs for this error type,
+        Perform a root cause analysis only. Search logs for this error type,
         identify affected services, trace the fault propagation, and provide
-        your structured RCA report.
+        your structured RCA report. Do NOT execute any remediation actions.
 
   - name: create_case
     type: kibana.createCaseDefaultSpace

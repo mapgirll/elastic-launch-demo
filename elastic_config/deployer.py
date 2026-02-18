@@ -550,7 +550,7 @@ steps:
         Significant event detected: {{{{ event.rule.name }}}}.
         Error type: {{{{ event.rule.tags[1] }}}}.
         Total errors in last 15 minutes: {{{{ steps.count_errors.output.values[0][0] }}}}.
-        Perform a full root cause analysis.
+        Perform a root cause analysis only. Do NOT execute any remediation actions.
 
   - name: create_case
     type: kibana.createCaseDefaultSpace

@@ -105,6 +105,7 @@ class ServiceManager:
         from log_generators.k8s_metrics_generator import run as run_k8s
         from log_generators.nginx_metrics_generator import run as run_nginx_metrics
         from log_generators.vpc_flow_generator import run as run_vpc
+        from log_generators.jvm_metrics_generator import run as run_jvm
 
         # Build scenario_data dict from context for scenario-dependent generators
         scenario_data = None
@@ -144,6 +145,7 @@ class ServiceManager:
             ("gen-mysql", run_mysql, common_args, common_kwargs),
             ("gen-k8s-metrics", run_k8s, k8s_args, k8s_kwargs),
             ("gen-nginx-metrics", run_nginx_metrics, common_args, common_kwargs),
+            ("gen-jvm-metrics", run_jvm, common_args, common_kwargs),
             ("gen-vpc-flow", run_vpc, common_args, common_kwargs),
         ]
         for name, fn, args, kwargs in generators:

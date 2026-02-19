@@ -1485,6 +1485,33 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                 except Exception:
                     pass
 
+        # Reset OTLP metric data streams so TSDB mappings are recreated fresh.
+        # This ensures new metric fields (added to generators after the data stream
+        # was first created) are included in the mapping.  The OTLP integration
+        # recreates these automatically once generators start sending data.
+        for ds_pattern in [
+            "metrics-*.otel-*",
+        ]:
+            try:
+                resp = client.get(
+                    f"{self.elastic_url}/_data_stream/{ds_pattern}",
+                    headers=_es_headers(self.api_key),
+                )
+                if resp.status_code < 300:
+                    streams = resp.json().get("data_streams", [])
+                    for ds in streams:
+                        ds_name = ds.get("name", "")
+                        if ds_name:
+                            r = client.delete(
+                                f"{self.elastic_url}/_data_stream/{ds_name}",
+                                headers=_es_headers(self.api_key),
+                            )
+                            if r.status_code < 300:
+                                deleted += 1
+                                logger.info("Deleted data stream %s for mapping refresh", ds_name)
+            except Exception as exc:
+                logger.warning("Data stream cleanup error (non-fatal): %s", exc)
+
         logger.info("Cleaned up %d artifacts across all scenarios", deleted)
         return deleted
 

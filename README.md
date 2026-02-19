@@ -1,69 +1,75 @@
-# NOVA-7 Launch Demo
+# Elastic Observability Demo Platform
 
-**A multi-cloud space launch simulation that demonstrates Elastic Observability with OpenTelemetry, AI-powered anomaly detection, and automated remediation.**
+**A multi-scenario, multi-cloud observability platform that demonstrates Elastic with OpenTelemetry, AI-powered anomaly detection, and automated remediation.**
 
-NOVA-7 simulates a space launch mission running nine microservices across AWS, GCP, and Azure. Each service emits real OpenTelemetry telemetry (logs, metrics, traces) through an OTel Collector into Elastic. A 20-channel chaos system injects realistic faults that Elastic detects, an AI agent investigates, and automated workflows resolve.
+Choose from 6 industry verticals — space launch, sports streaming, financial services, healthcare, gaming, and insurance — each with 9 simulated microservices across AWS, GCP, and Azure. Every scenario emits real OpenTelemetry telemetry (logs, metrics, traces) directly into Elastic Cloud. A 20-channel chaos system injects realistic faults that Elastic detects via ES|QL rules, an AI agent investigates, and automated workflows resolve.
 
 ---
 
 ## Architecture
 
 ```
-                          NOVA-7 Launch Demo
-   ┌──────────────────────────────────────────────────────────────┐
-   │                                                              │
-   │  ┌─────────────────── AWS us-east-1 ───────────────────┐    │
-   │  │  mission-control   fuel-system   ground-systems      │    │
-   │  │  (command)         (propulsion)  (ground)            │    │
-   │  └─────────────────────────────────────────────────────┘    │
-   │                                                              │
-   │  ┌─────────────────── GCP us-central1 ─────────────────┐    │
-   │  │  navigation     comms-array     payload-monitor      │    │
-   │  │  (guidance)     (comms)         (payload)            │    │
-   │  └─────────────────────────────────────────────────────┘    │
-   │                                                              │
-   │  ┌─────────────────── Azure eastus ────────────────────┐    │
-   │  │  sensor-validator   telemetry-relay   range-safety   │    │
-   │  │  (validation)       (relay)           (safety)       │    │
-   │  └─────────────────────────────────────────────────────┘    │
-   │                                                              │
-   │  ┌──────────┐    OTLP/HTTP     ┌────────────────────┐      │
-   │  │ FastAPI   │ ───────────────> │ OTel Collector     │      │
-   │  │ :8080     │                  │ :4317 gRPC         │      │
-   │  │           │                  │ :4318 HTTP         │      │
-   │  └──────────┘                  └────────┬───────────┘      │
-   │       │                                  │                   │
-   └───────│──────────────────────────────────│───────────────────┘
-           │                                  │
-           │ WebSocket + REST                 │ HTTPS / Elastic
-           │                                  │ exporter
-           ▼                                  ▼
-   ┌──────────────┐               ┌──────────────────────┐
-   │  Dashboard    │               │  Elastic Cloud       │
-   │  Chaos UI     │               │  ┌────────────────┐  │
-   │  Browser      │               │  │ Elasticsearch   │  │
-   └──────────────┘               │  │ Kibana          │  │
-                                   │  │ AI Assistant    │  │
-   ┌──────────────┐               │  │ Rules / Alerts  │  │
-   │ Notifications │               │  │ Workflows       │  │
-   │  Slack        │               │  └────────────────┘  │
-   │  Twilio SMS   │               └──────────────────────┘
-   │  Twilio Voice │
-   └──────────────┘
+                 Elastic Observability Demo Platform
+  ┌──────────────────────────────────────────────────────────────┐
+  │                                                              │
+  │  ┌─ Scenario: 9 Simulated Microservices ──────────────────┐  │
+  │  │                                                        │  │
+  │  │  AWS us-east-1       GCP us-central1    Azure eastus   │  │
+  │  │  ┌────────────┐     ┌────────────┐    ┌────────────┐  │  │
+  │  │  │ Service 1  │     │ Service 4  │    │ Service 7  │  │  │
+  │  │  │ Service 2  │     │ Service 5  │    │ Service 8  │  │  │
+  │  │  │ Service 3  │     │ Service 6  │    │ Service 9  │  │  │
+  │  │  └────────────┘     └────────────┘    └────────────┘  │  │
+  │  └────────────────────────────────────────────────────────┘  │
+  │                                                              │
+  │  FastAPI (:80)                    OTLP/HTTP (direct)         │
+  │  ┌──────────────────┐            ┌──────────────────────┐   │
+  │  │ Scenario Selector │──deploy──>│ Elastic Cloud        │   │
+  │  │ Dashboard         │           │ ┌──────────────────┐ │   │
+  │  │ Chaos Controller  │──OTLP───> │ │ Elasticsearch    │ │   │
+  │  │ Landing Page      │           │ │ Kibana           │ │   │
+  │  │ Python Deployer   │──REST───> │ │ AI Agent         │ │   │
+  │  │ Log Generators    │           │ │ Workflows        │ │   │
+  │  └──────────────────┘            │ │ Alerting Rules   │ │   │
+  │                                  │ └──────────────────┘ │   │
+  │                                  └──────────────────────┘   │
+  └──────────────────────────────────────────────────────────────┘
 ```
+
+**Key design:** The app sends OTLP telemetry directly to Elastic Cloud (no OTel Collector required). A built-in Python deployer configures all Elastic-side resources (agent, tools, workflows, alert rules, dashboards, significant events) automatically for each scenario.
+
+---
 
 ## Key Features
 
-- **9 simulated microservices** spread across 3 cloud providers (AWS, GCP, Azure)
-- **Real OpenTelemetry telemetry** — logs, metrics, and traces via OTLP
-- **20 independent fault channels** covering propulsion, guidance, communications, payload, relay, ground, validation, and safety subsystems
+- **6 industry scenarios** — space launch, sports streaming, financial services, healthcare, gaming, insurance
+- **9 simulated microservices per scenario** across 3 cloud providers (AWS, GCP, Azure)
+- **Real OpenTelemetry telemetry** — logs, metrics, and traces sent directly via OTLP
+- **20 independent fault channels** per scenario covering scenario-specific subsystems
 - **Cascade effects** — primary faults propagate warnings to dependent services
-- **Live dashboard** with real-time WebSocket updates
+- **Web-based scenario selector** — choose an industry vertical, connect to Elastic, deploy with one click
+- **Python deployer** — automatically provisions agent, tools, workflows, alert rules, dashboards, KB docs, and significant events in Elastic
+- **Live dashboard** with real-time WebSocket updates and per-scenario theming
 - **Chaos controller UI** for triggering and resolving faults during demos
-- **Elastic integration** — significant event detection with ES|QL rules
-- **AI agent investigation** — automated root cause analysis
-- **Automated remediation** via Elastic workflows
-- **Notifications** — Slack webhooks, Twilio SMS, and voice calls
+- **Background telemetry generators** — host metrics, Kubernetes metrics, Nginx metrics, VPC flow logs, MySQL logs, distributed traces
+- **Elastic integration** — significant event detection with ES|QL rules, AI agent investigation, automated remediation workflows
+- **Auto-remediation** — alert fires, workflow runs AI agent for RCA, agent calls remediation API, user gets email notification
+- **Multi-tenancy** — multiple scenarios can run simultaneously with independent deployment tracking
+
+---
+
+## Scenarios
+
+| ID | Name | Industry | Namespace |
+|----|------|----------|-----------|
+| space | NOVA-7 Launch Control | Space / Aerospace | nova7 |
+| fanatics | Fanatics Live | Sports Streaming | fanatics |
+| financial | Financial Services Platform | Financial Services | finserv |
+| healthcare | Healthcare Platform | Healthcare | healthcare |
+| gaming | Gaming Platform | Gaming | gaming |
+| usaa | USAA Platform | Insurance / Banking | usaa |
+
+Each scenario provides its own services, fault channels, UI theme, terminology, and countdown configuration. The scenario framework (`scenarios/base.py`) defines the interface; each scenario directory implements it.
 
 ---
 
@@ -71,56 +77,61 @@ NOVA-7 simulates a space launch mission running nine microservices across AWS, G
 
 ### 1. Prerequisites
 
-- Docker and Docker Compose
-- An Elastic Cloud deployment (or self-hosted Elasticsearch 8.x+)
+- An EC2 instance (or similar server) with Python 3.11+
+- An Elastic Cloud deployment with an API key
 
 ### 2. Configure
 
 ```bash
 cp .env.example .env
-# Edit .env — set ELASTIC_ENDPOINT and ELASTIC_API_KEY at minimum
+# Edit .env — set at minimum:
+#   ELASTIC_URL, ELASTIC_API_KEY, KIBANA_URL
+#   OTLP_ENDPOINT (your Elastic OTLP endpoint)
+#   OTLP_API_KEY
 ```
 
-### 3. Deploy
+### 3. Start the App
 
 ```bash
-./setup.sh
+sudo python3 -m uvicorn app.main:app --host 0.0.0.0 --port 80
 ```
 
-### 4. Open
+### 4. Open the Scenario Selector
 
-| URL | Description |
-|-----|-------------|
-| http://localhost:8080/dashboard | Mission control dashboard |
-| http://localhost:8080/chaos | Chaos controller UI |
-| http://localhost:8080/health | Health check endpoint |
-| http://localhost:8080/api/status | Full system status API |
+Navigate to `http://<your-host>/` — this opens the scenario selector where you:
+
+1. Choose an industry vertical
+2. Enter your Elastic Cloud credentials
+3. Click **Launch** to deploy all Elastic-side resources and start telemetry
 
 ### 5. Demo
 
-Trigger a fault, watch Elastic detect it, let the AI investigate, resolve it:
+| URL | Description |
+|-----|-------------|
+| `http://<host>/` | Scenario selector (choose and deploy) |
+| `http://<host>/home?deployment_id=...` | Scenario landing page |
+| `http://<host>/dashboard?deployment_id=...` | Live mission control dashboard |
+| `http://<host>/chaos?deployment_id=...` | Chaos controller UI |
+| `http://<host>/health` | Health check endpoint |
+| `http://<host>/api/status` | Full system status API |
+
+### 6. Trigger a Fault
 
 ```bash
-# Trigger Channel 2 — Fuel Pressure Anomaly
-curl -X POST http://localhost:8080/api/chaos/trigger \
+# Trigger Channel 2
+curl -X POST http://<host>/api/chaos/trigger \
   -H 'Content-Type: application/json' \
   -d '{"channel": 2}'
 
-# Watch the dashboard and Kibana...
-
 # Resolve
-curl -X POST http://localhost:8080/api/remediate/2
-```
-
-### 6. Teardown
-
-```bash
-./teardown.sh
+curl -X POST http://<host>/api/remediate/2
 ```
 
 ---
 
-## Fault Channels
+## Fault Channels (Space Scenario Example)
+
+Each scenario defines 20 fault channels. Here are the channels for the default **space** scenario:
 
 | Ch | Name | Subsystem | Cloud |
 |----|------|-----------|-------|
@@ -145,46 +156,71 @@ curl -X POST http://localhost:8080/api/remediate/2
 | 19 | FTS Check Failure | safety | Azure |
 | 20 | Range Safety Tracking Loss | safety | Azure |
 
-See [docs/CHANNEL_REFERENCE.md](docs/CHANNEL_REFERENCE.md) for full details on all 20 channels.
+See [docs/CHANNEL_REFERENCE.md](docs/CHANNEL_REFERENCE.md) for full details. Other scenarios have different channel names and subsystems appropriate to their industry.
 
 ---
 
 ## API Reference
 
-### Health
+### Health & Status
 
 ```
-GET /health
+GET  /health                        # Health check
+GET  /api/status                    # All services status
+GET  /api/scenarios                 # List available scenarios
+GET  /api/scenario                  # Active scenario details
 ```
 
-### System Status
+### Deployments
 
 ```
-GET /api/status
+GET  /api/deployments               # List active deployments
+POST /api/deployments/{id}/stop     # Stop a deployment
+DELETE /api/deployments/{id}        # Remove a deployment
+```
+
+### Setup & Deployment
+
+```
+POST /api/setup/test-connection     # Test Elastic Cloud connectivity
+POST /api/setup/launch              # Deploy a scenario to Elastic
+GET  /api/setup/progress            # Deployment progress (SSE)
+GET  /api/setup/detect              # Auto-detect Elastic credentials
+POST /api/setup/teardown            # Tear down Elastic resources
+POST /api/setup/stop-and-teardown   # Stop telemetry and tear down
+GET  /api/setup/teardown-progress   # Teardown progress
 ```
 
 ### Chaos Control
 
 ```
-POST /api/chaos/trigger     {"channel": 1, "mode": "calibration"}
-POST /api/chaos/resolve     {"channel": 1}
-GET  /api/chaos/status
-GET  /api/chaos/status/{channel}
+POST /api/chaos/trigger             # {"channel": 1}
+POST /api/chaos/resolve             # {"channel": 1}
+GET  /api/chaos/status              # All channels
+GET  /api/chaos/status/{channel}    # Single channel
 ```
 
-### Remediation
+### Remediation & Countdown
 
 ```
-POST /api/remediate/{channel}
+POST /api/remediate/{channel}       # Resolve a fault channel
+POST /api/countdown/start           # Start countdown
+POST /api/countdown/pause           # Pause countdown
+POST /api/countdown/reset           # Reset countdown
+POST /api/countdown/speed           # {"speed": 2.0}
 ```
 
-### Countdown
+### Notifications
 
 ```
-POST /api/countdown/start
-POST /api/countdown/pause
-POST /api/countdown/reset
-POST /api/countdown/speed   {"speed": 2.0}
+POST /api/notify/email              # Send email notification
+GET  /api/user/info                 # Current user info
+```
+
+### WebSocket
+
+```
+WS   /ws/dashboard                  # Real-time dashboard updates
 ```
 
 ---
@@ -194,52 +230,64 @@ POST /api/countdown/speed   {"speed": 2.0}
 ```
 elastic-launch-demo/
 ├── app/
-│   ├── main.py                    # FastAPI application entry point
-│   ├── config.py                  # Configuration and channel registry
-│   ├── telemetry.py               # OTLP client (logs, metrics, traces)
-│   ├── __init__.py
-│   ├── services/                  # 9 simulated microservices
-│   │   ├── manager.py             # Service lifecycle manager
-│   │   ├── base_service.py        # Abstract base with telemetry helpers
-│   │   ├── mission_control.py
-│   │   ├── fuel_system.py
-│   │   ├── ground_systems.py
-│   │   ├── navigation.py
-│   │   ├── comms_array.py
-│   │   ├── payload_monitor.py
-│   │   ├── sensor_validator.py
-│   │   ├── telemetry_relay.py
-│   │   └── range_safety.py
-│   ├── chaos/                     # Chaos injection system
-│   │   ├── controller.py          # Channel state management
-│   │   ├── channels.py            # Channel definitions helper
-│   │   └── channel_definitions.json
-│   ├── dashboard/                 # Mission control dashboard
-│   │   ├── websocket.py           # WebSocket handler
-│   │   └── static/                # HTML/CSS/JS
-│   ├── chaos_ui/                  # Chaos controller UI
-│   │   └── static/                # HTML/CSS/JS
-│   └── notify/                    # Notification handlers
-│       ├── __init__.py
-│       ├── twilio_handler.py      # SMS + voice via Twilio REST API
-│       ├── slack_handler.py       # Slack webhook alerts
-│       └── twiml_templates/       # TwiML XML for voice calls
-│           ├── anomaly_detected.xml
-│           └── anomaly_resolved.xml
+│   ├── main.py                      # FastAPI entry point — all routes
+│   ├── config.py                    # Environment config + scenario loading
+│   ├── telemetry.py                 # OTLPClient (direct HTTP to Elastic)
+│   ├── trace_context.py             # Log-trace correlation (shared context)
+│   ├── context.py                   # ScenarioContext (per-deployment state)
+│   ├── instance.py                  # ScenarioInstance (running deployment)
+│   ├── registry.py                  # InstanceRegistry (multi-tenancy)
+│   ├── store.py                     # DeploymentStore (SQLite persistence)
+│   ├── services/                    # 9 simulated microservices
+│   │   ├── base_service.py          # Abstract base with telemetry helpers
+│   │   ├── manager.py              # Service lifecycle manager
+│   │   └── *.py                     # Individual service implementations
+│   ├── chaos/                       # Chaos injection system
+│   │   ├── controller.py           # Channel state management
+│   │   └── channels.py             # Channel definitions helper
+│   ├── selector/static/             # Scenario selector UI (front page)
+│   ├── landing/static/              # Per-scenario landing page
+│   ├── dashboard/                   # Live dashboard
+│   │   ├── websocket.py            # WebSocket handler
+│   │   └── static/                  # HTML/CSS/JS
+│   ├── chaos_ui/static/             # Chaos controller UI
+│   └── notify/                      # Notification handlers
+│       ├── twilio_handler.py        # SMS + voice via Twilio
+│       └── slack_handler.py         # Slack webhooks
+├── scenarios/
+│   ├── base.py                      # BaseScenario ABC, UITheme, CountdownConfig
+│   ├── __init__.py                  # ScenarioRegistry with auto-discovery
+│   ├── space/                       # NOVA-7 space launch scenario
+│   ├── fanatics/                    # Sports streaming scenario
+│   ├── financial/                   # Financial services scenario
+│   ├── healthcare/                  # Healthcare scenario
+│   ├── gaming/                      # Gaming scenario
+│   └── usaa/                        # Insurance/banking scenario
+├── log_generators/
+│   ├── host_metrics_generator.py    # system.* host metrics (3 hosts)
+│   ├── k8s_metrics_generator.py     # Kubernetes node/pod/container metrics
+│   ├── nginx_metrics_generator.py   # Nginx receiver metrics
+│   ├── nginx_log_generator.py       # Nginx access/error logs
+│   ├── mysql_log_generator.py       # MySQL query logs
+│   ├── vpc_flow_generator.py        # VPC flow logs
+│   └── trace_generator.py          # Distributed traces
+├── elastic_config/
+│   ├── deployer.py                  # Python deployer (provisions Elastic resources)
+│   ├── workflows/                   # Workflow YAML templates
+│   └── dashboards/                  # Executive dashboard generator
 ├── docs/
-│   ├── DEMO_SCRIPT.md             # Presenter talk track
-│   ├── SE_QUICK_START.md          # Quick start for SEs
+│   ├── DEMO_SCRIPT.md              # Presenter talk track
+│   ├── SE_QUICK_START.md           # Quick start for SEs
 │   ├── SETUP_GUIDE.md             # Full deployment guide
-│   ├── CHANNEL_REFERENCE.md       # All 20 channels detailed
+│   ├── CHANNEL_REFERENCE.md       # Channel details (space scenario)
 │   └── TROUBLESHOOTING.md         # Common issues and solutions
-├── docker-compose.yml             # Container orchestration
-├── Dockerfile                     # NOVA-7 app container
-├── otel-collector-config.yaml     # OTel Collector pipeline config
-├── requirements.txt               # Python dependencies
-├── setup.sh                       # Automated setup and deploy
-├── teardown.sh                    # Clean teardown
-├── .env.example                   # Environment variable template
-└── README.md                      # This file
+├── start.sh                        # Start the app
+├── stop.sh                         # Stop the app
+├── validate.sh                     # Comprehensive validation
+├── requirements.txt                # Python dependencies
+├── .env.example                    # Environment variable template
+├── AGENTS.MD                       # Full Kibana/ES API reference
+└── README.md                       # This file
 ```
 
 ---
@@ -248,11 +296,12 @@ elastic-launch-demo/
 
 | Document | Description |
 |----------|-------------|
-| [SE Quick Start](docs/SE_QUICK_START.md) | Get running in under 10 minutes |
+| [SE Quick Start](docs/SE_QUICK_START.md) | Get a demo running in under 10 minutes |
 | [Setup Guide](docs/SETUP_GUIDE.md) | Full deployment from scratch |
-| [Demo Script](docs/DEMO_SCRIPT.md) | Presenter talk track with 3 acts |
-| [Channel Reference](docs/CHANNEL_REFERENCE.md) | All 20 fault channels detailed |
+| [Demo Script](docs/DEMO_SCRIPT.md) | Presenter talk track (3 acts) |
+| [Channel Reference](docs/CHANNEL_REFERENCE.md) | All 20 fault channels (space scenario) |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and solutions |
+| [AGENTS.MD](AGENTS.MD) | Full Kibana and Elasticsearch API reference |
 
 ---
 
@@ -261,10 +310,12 @@ elastic-launch-demo/
 | Component | Technology |
 |-----------|-----------|
 | Application | Python 3.11, FastAPI, uvicorn |
-| Telemetry Protocol | OpenTelemetry (OTLP JSON over HTTP) |
-| Telemetry Collector | OpenTelemetry Collector Contrib 0.96.0 |
-| Observability Platform | Elastic (Elasticsearch, Kibana) |
+| Telemetry Protocol | OpenTelemetry (OTLP JSON over HTTP, direct to Elastic) |
 | HTTP Client | httpx with HTTP/2 |
+| Observability Platform | Elastic Cloud (Elasticsearch, Kibana) |
+| AI Agent | Elastic Agent Builder (tools, KB, system prompt) |
+| Workflows | Elastic Workflows (alert → search → AI agent → remediate → email) |
 | Real-time Updates | WebSockets |
-| Container Runtime | Docker, Docker Compose |
-| Notifications | Twilio REST API (SMS + voice), Slack Webhooks |
+| Persistence | SQLite (deployment state) |
+| Deployment | EC2 (uvicorn on port 80) |
+| Notifications | Elastic Cloud SMTP, Twilio (SMS + voice), Slack Webhooks |

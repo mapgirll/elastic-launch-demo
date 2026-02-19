@@ -48,9 +48,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# ---------------------- Docker ------------------------------
-# Ignore local docker overrides (keep docker-compose.yml)
-docker-compose.override.yml
 
 # ---------------------- OS ----------------------------------
 *.pid

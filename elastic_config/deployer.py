@@ -1163,12 +1163,12 @@ When the user asks you to fix or remediate this issue, use remediation_action to
         for ch_num, ch_data in sorted(registry.items()):
             num_str = f"{int(ch_num):02d}"
             error_type = ch_data["error_type"]
-            kql_query = f'body.text: "{error_type}" AND severity_text: "ERROR"'
+            esql_query = f'FROM logs.otel | WHERE body.text LIKE "*{error_type}*" AND severity_text == "ERROR"'
             operations.append({
                 "index": {
                     "id": f"{self.ns}-se-ch{num_str}",
                     "title": f"Channel {num_str}: {ch_data['name']}",
-                    "kql": {"query": kql_query},
+                    "esql": {"query": esql_query},
                 }
             })
 
@@ -1184,6 +1184,7 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                 step.items_done = len(operations)
                 step.detail = f"Created {len(operations)} stream queries"
             else:
+                logger.warning("Significant events bulk create failed: %s", resp.text[:500])
                 step.detail = f"Bulk create failed (HTTP {resp.status_code})"
 
         step.status = "ok" if step.items_done > 0 else "failed"

@@ -22,7 +22,7 @@ Choose from 6 industry verticals — space launch, sports streaming, financial s
   │  │  └────────────┘     └────────────┘    └────────────┘  │  │
   │  └────────────────────────────────────────────────────────┘  │
   │                                                              │
-  │  FastAPI (:80)                    OTLP/HTTP (direct)         │
+  │  FastAPI (:8080)                  OTLP/HTTP (direct)         │
   │  ┌──────────────────┐            ┌──────────────────────┐   │
   │  │ Scenario Selector │──deploy──>│ Elastic Cloud        │   │
   │  │ Dashboard         │           │ ┌──────────────────┐ │   │
@@ -89,7 +89,7 @@ pip install -r requirements.txt
 ### 3. Start the App
 
 ```bash
-sudo python3 -m uvicorn app.main:app --host 0.0.0.0 --port 80
+python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
 ### 4. Open the Scenario Selector
@@ -313,5 +313,5 @@ elastic-launch-demo/
 | Workflows | Elastic Workflows (alert → search → AI agent → remediate → email) |
 | Real-time Updates | WebSockets |
 | Persistence | SQLite (deployment state) |
-| Deployment | EC2 (uvicorn on port 80) |
+| Deployment | EC2 (uvicorn on port 8080) |
 | Notifications | Elastic Cloud SMTP, Twilio (SMS + voice), Slack Webhooks |

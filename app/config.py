@@ -27,7 +27,7 @@ SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM = os.getenv("SMTP_FROM", "nova7-ops@mission-control.local")
 
-APP_PORT = int(os.getenv("APP_PORT", "80"))
+APP_PORT = int(os.getenv("APP_PORT", "8080"))
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 
 # ── Active Scenario ───────────────────────────────────────────────────────

@@ -69,7 +69,7 @@ steps:
     with:
       title: "__SCENARIO_NAME__ RCA: {{ event.rule.name }}"
       description: |
-       [View Full Conversation]({{ kibanaUrl }}/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }})
+       [View Full Conversation](/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }})
 
        {{ steps.run_rca.output.message }}
       tags:

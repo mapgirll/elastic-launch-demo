@@ -14,7 +14,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import (
     ACTIVE_SCENARIO, APP_HOST, APP_PORT, CHANNEL_REGISTRY,
-    MISSION_ID, MISSION_NAME, NAMESPACE, SERVICES,
+    ELASTIC_API_KEY, ELASTIC_URL, KIBANA_URL,
+    MISSION_ID, MISSION_NAME, NAMESPACE, OTLP_ENDPOINT, SERVICES,
 )
 
 logging.basicConfig(
@@ -74,6 +75,76 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Failed to restore deployment %s", rec["deployment_id"])
             store.set_status(rec["deployment_id"], "error")
+
+    # Auto-deploy from environment variables if credentials are provided
+    # and the scenario is not already running from a restored SQLite record.
+    if KIBANA_URL and ELASTIC_API_KEY and not registry.get(ACTIVE_SCENARIO):
+        import threading
+        from elastic_config.deployer import ScenarioDeployer
+
+        scenario_id = ACTIVE_SCENARIO
+        kibana_url = KIBANA_URL.strip().rstrip("/")
+        api_key = ELASTIC_API_KEY.strip()
+
+        # Derive ES URL from Kibana URL unless explicitly provided
+        elastic_url = ELASTIC_URL.strip().rstrip("/") if ELASTIC_URL else ""
+        if not elastic_url and ".kb." in kibana_url:
+            elastic_url = kibana_url.replace(".kb.", ".es.")
+
+        logger.info("Auto-deploy triggered from environment variables (scenario=%s)", scenario_id)
+
+        scenario = get_scenario(scenario_id)
+        deployer = ScenarioDeployer(scenario, elastic_url, kibana_url, api_key)
+        deployment_id = scenario_id
+
+        def _progress_cb(progress):
+            d = progress.to_dict()
+            _deploy_progress[deployment_id] = d
+            # Log the most recent step so progress is visible in container logs
+            steps = d.get("steps") or []
+            if steps:
+                last = steps[-1]
+                logger.info(
+                    "[auto-deploy:%s] %s — %s%s",
+                    deployment_id,
+                    last.get("name", ""),
+                    last.get("status", ""),
+                    f" ({last['detail']})" if last.get("detail") else "",
+                )
+
+        def _auto_deploy():
+            result = deployer.deploy_all(callback=_progress_cb)
+            # Explicit env var takes priority, then deployer-derived, then default config
+            otlp_endpoint = OTLP_ENDPOINT or result.otlp_endpoint or ""
+            try:
+                ctx = ScenarioContext.from_scenario(
+                    scenario,
+                    otlp_endpoint=otlp_endpoint,
+                    otlp_api_key=api_key,
+                    elastic_url=elastic_url,
+                    elastic_api_key=api_key,
+                    kibana_url=kibana_url,
+                )
+                instance = ScenarioInstance(ctx, chaos_store=chaos_store)
+                if otlp_endpoint:
+                    instance.otlp.reconfigure(otlp_endpoint, api_key)
+                instance.start()
+                registry.register(deployment_id, instance)
+                store.upsert(
+                    deployment_id=deployment_id,
+                    scenario_id=scenario_id,
+                    otlp_endpoint=otlp_endpoint,
+                    otlp_api_key=api_key,
+                    elastic_url=elastic_url,
+                    elastic_api_key=api_key,
+                    kibana_url=kibana_url,
+                )
+                logger.info("Auto-deploy complete: %s (%s)", deployment_id, scenario_id)
+            except Exception:
+                logger.exception("Auto-deploy failed for %s", scenario_id)
+
+        _deploy_progress[deployment_id] = {"finished": False, "error": "", "steps": []}
+        threading.Thread(target=_auto_deploy, daemon=True).start()
 
     yield
 
@@ -764,6 +835,22 @@ async def setup_progress(deployment_id: Optional[str] = None):
     if _deploy_progress:
         return list(_deploy_progress.values())[-1]
     return {"finished": True, "error": "", "steps": []}
+
+
+@app.get("/api/setup/auto-deploy")
+async def auto_deploy_status():
+    """Return whether an env-var-triggered auto-deploy is currently in progress.
+
+    The selector UI polls this on load so it can show the progress panel
+    without the user having to click Launch.
+    """
+    if ACTIVE_SCENARIO in _deploy_progress:
+        p = _deploy_progress[ACTIVE_SCENARIO]
+        return {
+            "in_progress": not p.get("finished", True),
+            "deployment_id": ACTIVE_SCENARIO,
+        }
+    return {"in_progress": False, "deployment_id": None}
 
 
 @app.get("/api/setup/detect")

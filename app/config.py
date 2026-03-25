@@ -33,6 +33,13 @@ APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 # ── Active Scenario ───────────────────────────────────────────────────────
 ACTIVE_SCENARIO = os.getenv("ACTIVE_SCENARIO", "space")
 
+# ── Auto-deploy Credentials (optional) ───────────────────────────────────────
+# If set, the app will automatically deploy ACTIVE_SCENARIO on startup
+# without requiring manual input via the UI.
+KIBANA_URL = os.getenv("KIBANA_URL", "")
+ELASTIC_API_KEY = os.getenv("ELASTIC_API_KEY", "")
+ELASTIC_URL = os.getenv("ELASTIC_URL", "")
+
 from scenarios import get_scenario  # noqa: E402
 
 _scenario = get_scenario(ACTIVE_SCENARIO)

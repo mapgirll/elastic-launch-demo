@@ -522,6 +522,17 @@
         await refreshDeployments();
 
         renderScenarios();
+
+        // If an env-var auto-deploy is in progress, show the progress panel immediately
+        try {
+            const status = await (await fetch('/api/setup/auto-deploy')).json();
+            if (status.in_progress && status.deployment_id) {
+                const progressPanel = document.getElementById('progress-panel');
+                progressPanel.classList.add('visible');
+                progressPanel.querySelector('h2').textContent = 'Auto-deploying ' + status.deployment_id + '…';
+                pollProgress(status.deployment_id);
+            }
+        } catch (e) {}
     }
 
     async function refreshDeployments() {

@@ -32,7 +32,7 @@ class EventsMixin:
                 "index": {
                     "id": f"{self.ns}-se-ch{num_str}",
                     "title": f"Channel {num_str}: {ch_data['name']}",
-                    "description": "",
+                    "description": f"{ch_data.get('subsystem', 'system')} — {error_type}",
                     "esql": {"query": esql_query},
                 }
             })

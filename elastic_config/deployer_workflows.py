@@ -49,7 +49,7 @@ class WorkflowsMixin:
         notify(self.progress)
 
     def _generate_workflow_yamls(self) -> dict[str, str]:
-        """Generate 4 workflow YAMLs templated for this scenario."""
+        """Generate workflow YAMLs templated for this scenario."""
         ns = self.ns
         scenario_name = self.scenario.scenario_name
         agent_cfg = self.scenario.agent_config

@@ -243,17 +243,41 @@ Required metrics (must be enabled explicitly on upstream Collector):
 
 ---
 
-## Kibana Workflows API (Pre-GA, 9.4.0)
+## Kibana Workflows API
 
-### Endpoints
+### Route Migration (9.4.0+)
+
+The Workflows API paths changed in 9.4.0. The deployer (`elastic_config/deployer.py`) uses
+helper methods `_wf_create`, `_wf_search`, and `_wf_delete` that try the new path first and
+fall back to the old path on 404/405, supporting both versions simultaneously.
+
+| Operation | Old path (pre-9.4) | New path (9.4+) |
+| --------- | ------------------ | --------------- |
+| Create single | `POST /api/workflows` body `{"yaml":"..."}` | `POST /api/workflows/workflow` |
+| Bulk create | `POST /api/workflows/_bulk_create` | `POST /api/workflows` body `{"workflows":[...]}` |
+| Search/list | `POST /api/workflows/search` body `{"page":1,"size":100}` | `GET /api/workflows` |
+| Get by ID | `GET /api/workflows/{id}` | `GET /api/workflows/workflow/{id}` |
+| Update | `PUT /api/workflows/{id}` | `PUT /api/workflows/workflow/{id}` |
+| Delete | `DELETE /api/workflows/{id}` | `DELETE /api/workflows/workflow/{id}` |
+| Run | `POST /api/workflows/{id}/run` | `POST /api/workflows/workflow/{id}/run` |
+| Execution status | `GET /api/workflowExecutions/{id}` | `GET /api/workflows/executions/{id}` |
+
+**CRITICAL (9.4.0 breaking change):** `POST /api/workflows` is now the **bulk create** endpoint
+expecting `{"workflows": [...]}`. Sending `{"yaml": "..."}` to this path returns:
+`{"statusCode":400,"error":"Bad Request","message":"[{\"expected\":\"array\",\"path\":[\"workflows\"]}]"}`
+Use `POST /api/workflows/workflow` for single workflow creation on 9.4+.
+
+### Endpoints (legacy reference)
+
 ```
-POST /api/workflows              — Create (body: {"yaml": "..."})
-PUT  /api/workflows/{id}         — Update (body: {"yaml": "..."})
-POST /api/workflows/search       — List/search (body: {"page":1,"size":100})
-GET  /api/workflows/{id}         — Get by ID
-DELETE /api/workflows/{id}       — Delete
-POST /api/workflows/{id}/run     — Run (body: {"inputs": {...}})
-GET  /api/workflowExecutions/{id} — Execution status
+POST /api/workflows/workflow     — Create single (9.4+)
+POST /api/workflows              — Create single (pre-9.4) / Bulk create (9.4+)
+POST /api/workflows/search       — List/search (pre-9.4)
+GET  /api/workflows              — List/search (9.4+)
+DELETE /api/workflows/workflow/{id} — Delete (9.4+)
+DELETE /api/workflows/{id}       — Delete (pre-9.4)
+POST /api/workflows/workflow/{id}/run — Run (9.4+)
+GET  /api/workflowExecutions/{id} — Execution status (pre-9.4)
 ```
 
 ### CRITICAL: Required Header
@@ -446,7 +470,8 @@ All Streams endpoints require both:
 - `kbn-xsrf: true`
 - `x-elastic-internal-origin: kibana`
 
-### Query Schema — `kql` is MANDATORY
+### Query Schema — `esql` format (current, 9.4.0+)
+
 ```json
 {
   "operations": [
@@ -454,8 +479,9 @@ All Streams endpoints require both:
       "index": {
         "id": "my-query-id",
         "title": "Human-readable title",
-        "kql": {
-          "query": "attributes.error.type: \"SomeException\" AND attributes.sensor.type: \"thermal\""
+        "description": "",
+        "esql": {
+          "query": "FROM logs.otel,logs.otel.* METADATA _id, _source | WHERE body.text LIKE \"*ERROR_CODE*\" AND severity_text == \"ERROR\""
         }
       }
     }
@@ -464,8 +490,11 @@ All Streams endpoints require both:
 ```
 
 **Gotchas:**
-- The `kql` field (object with `query` string) is **REQUIRED** — without it, returns 400 ZodError
-- The `filter` DSL (`and`/`or`/`eq` combinators) from the API docs does **NOT** work as the required field
+
+- `description` is **REQUIRED** as of 9.4.0 — omitting it returns 400 `invalid_union` ZodError; an empty string `""` is acceptable
+- The `esql` field (object with `query` string) is the current supported format — use `FROM logs.otel,logs.otel.*` for OTLP log streams
+- The `kql` field was used in earlier versions; `esql` is now preferred for semantic searchability
+- The `filter` DSL (`and`/`or`/`eq` combinators) from the API docs does **NOT** work
 - `evidence` and `feature` fields are optional metadata (they get stored but are not the detection mechanism)
 - Delete operations in bulk: `{"delete": {"id": "query-id"}}`
 - IDs should be prefixed for easy cleanup (e.g., `nova7-se-ch01`)
@@ -481,7 +510,7 @@ attributes.error.type: "ThermalCalibrationException" AND attributes.sensor.type:
 
 ### Stream Name Discovery
 - `GET /api/streams` returns available streams
-- For OTLP logs, the stream name is `logs`
+- For OTLP logs, the stream name is `logs.otel`
 - Stream must contain data for queries to match
 
 ### Verification
@@ -788,3 +817,178 @@ POST /api/actions/connector
 30. **Prefer parameterized esql tools over `index_search` for logs** — `index_search` lets the LLM auto-generate ES|QL queries, which consistently fails: uses `message` instead of `body.text`, `FROM logs` instead of `FROM logs,logs.*`, `resource.attributes.service.name` instead of `service.name`, `MATCH()` instead of `LIKE`. Parameterized `esql` tools bake in correct field names and query patterns — the LLM only provides parameter values, eliminating 3-4 wasted tool calls per investigation
 29. **`elasticsearch.esql.query` step — preferred for text search in workflows** — Use `elasticsearch.esql.query` instead of `elasticsearch.search` when you need `match_phrase`, `sort`, or other schema-restricted features. Key patterns: (a) Use `FROM logs,logs.*` to include sub-streams. (b) Use `KQL()` function for text matching: `WHERE KQL("body.text: \"ErrorType\" AND severity_text: \"ERROR\"")`. (c) Output is `{columns: [{name, type}], values: [[row1], [row2]]}`. (d) Access values positionally: `steps.X.output.values[0][0]` for first row, first column. (e) Column order matches `KEEP` clause. (f) `format: json` is required in `with` block
 30. **Alert rule tags for workflow data passing** — Since `inputs.*` is blank in alert-triggered workflows, encode key data in alert rule tags. Example: `tags: ["nova7", "FuelPressureException"]` → access in workflow as `event.rule.tags[1]`. Keep tags minimal (prefix + error_type) for reliable array index access
+
+---
+
+## Deployer Architecture & URL Derivation
+
+### Mixin Pattern and Step Indexing
+
+The deployer is composed of mixins (`SloMixin`, `AlertingMixin`, `DashboardMixin`, etc.), each contributing one or more numbered steps to `DeployProgress`. Steps are referenced by index via `self._step(n)`. Adding a new step at any index requires bumping all `_step()` calls in every file with a higher index.
+
+**Current step index assignments (as of 2026-03-31):**
+| Index | Step | File |
+|-------|------|------|
+| 0 | Connectivity check | `deployer.py` |
+| 1 | Derive Elasticsearch URL | `deployer.py` |
+| 2 | Derive OTLP endpoint | `deployer_otlp.py` |
+| 3 | Clean up old artifacts | `deployer.py` |
+| 4 | Configure platform settings | `deployer_platform.py` |
+| 5 | Generate APM rollup data | `deployer_apm.py` |
+| 6 | Deploy workflows | `deployer_workflows.py` |
+| 7 | Index knowledge base | `deployer_kb.py` |
+| 8 | Deploy AI agent tools | `deployer_agent.py` |
+| 9 | Create AI agent | `deployer_agent.py` |
+| 10 | Create significant events | `deployer_events.py` |
+| 11 | Create data views | `deployer_views.py` |
+| 12 | Import executive dashboard | `deployer_dashboard.py` |
+| 13 | Create alert rules | `deployer_alerting.py` |
+| 14 | Enable APM anomaly detection | `deployer_apm.py` |
+| 15 | Create SLOs | `deployer_slos.py` |
+
+**Gotcha:** When inserting a step, update `_step(n)` calls in every mixin file that uses a higher index. There are typically 9+ files involved.
+
+### Elasticsearch URL Derivation (Three-Strategy Hierarchy)
+
+The function `_derive_elastic_url(kibana_url, api_key, explicit="")` in `app/main.py` implements this priority order:
+
+1. **Explicit** — if the user supplied `ELASTIC_URL` env var or typed one in the UI, use it directly
+2. **Fleet API** — `GET {kibana_url}/api/fleet/outputs` (requires auth header `ApiKey {api_key}`). Find the item with `"name": "default"` and use its `hosts[0]`
+3. **URL substitution** — replace `.kb.` with `.es.` in the Kibana URL (Elastic Cloud pattern)
+
+```python
+def _derive_elastic_url(kibana_url: str, api_key: str, explicit: str = "") -> str:
+    if explicit:
+        return explicit.strip().rstrip("/")
+    try:
+        resp = client.get(f"{kibana_url}/api/fleet/outputs",
+            headers={"Authorization": f"ApiKey {api_key}", "kbn-xsrf": "true"})
+        if resp.status_code == 200:
+            for item in resp.json().get("items", []):
+                if item.get("name") == "default":
+                    hosts = item.get("hosts", [])
+                    if hosts:
+                        return hosts[0].rstrip("/")
+    except Exception as exc:
+        logger.warning("Fleet API ES URL derivation failed: %s", exc)
+    if ".kb." in kibana_url:
+        return kibana_url.replace(".kb.", ".es.")
+    return ""
+```
+
+**CRITICAL:** Use `logger.warning()` in the except block — `except Exception: pass` silently swallows Fleet API failures and makes derivation failures impossible to diagnose.
+
+### OTLP Endpoint Derivation
+
+`_derive_otlp_endpoint(client)` in `elastic_config/deployer.py` tries three strategies in order:
+
+1. **`OTLP_ENDPOINT` env var** — if set explicitly, used as-is; derivation is skipped entirely
+2. **Cluster settings API** — `GET {elastic_url}/_cluster/settings?include_defaults=true`, extracts `persistent.cluster.metadata.display_name` (falls back to `defaults.cluster.name`), converts `"Name (ID)"` → `"Name-ID"`, combines with the cloud suffix from the ES URL → `https://{alias}.ingest.{suffix}:443`
+3. **URL substitution** — replace `.es.` with `.ingest.` in the ES URL, append `:443` if missing
+
+Each candidate from strategies 2 and 3 is verified with `_verify_otlp_candidate(client, url)`:
+```
+POST {url}/v1/logs  body: {"resourceLogs": []}
+```
+Returns the first candidate that responds with HTTP 200. If both probes fail, returns `None`.
+
+**Fallback in auto-deploy** — If the deployer returns an empty `otlp_endpoint` (probes failed),
+`app/main.py` uses a pre-computed fallback derived from `ELASTIC_URL` at startup (`.es.` → `.ingest.:443`) without a live probe. Priority chain in auto-deploy:
+```
+OTLP_ENDPOINT env var  →  deployer result (probe-verified)  →  pre-computed fallback  →  "" (silent drop)
+```
+
+**CRITICAL:** `OTLP_ENDPOINT` previously defaulted to `"http://otel-collector:4318"` in `config.py`,
+which was always truthy and blocked the deployer-derived endpoint. It now defaults to `""`.
+
+**CRITICAL:** `OTLPClient._send()` silently returns if `self.endpoint` is empty (no exception, no log).
+This prevents "Request URL is missing an 'http://' or 'https://' protocol" errors when the endpoint
+hasn't been configured yet. Telemetry is dropped until `reconfigure()` is called.
+
+### Auto-Deploy from Environment Variables
+
+If `KIBANA_URL` and `ELASTIC_API_KEY` are set in `.env` (or as container env vars), the app
+automatically deploys `ACTIVE_SCENARIO` on startup without requiring UI interaction.
+
+**Supported env vars:**
+
+| Variable | Required | Notes |
+| -------- | -------- | ----- |
+| `KIBANA_URL` | Yes | Triggers auto-deploy when set alongside `ELASTIC_API_KEY` |
+| `ELASTIC_API_KEY` | Yes | Used for all Elastic API calls |
+| `ACTIVE_SCENARIO` | No | Defaults to `space` |
+| `ELASTIC_URL` | No | Auto-derived from `KIBANA_URL` (`.kb.` → `.es.`) if not set |
+| `OTLP_ENDPOINT` | No | Auto-derived from ES URL if not set (see OTLP derivation above) |
+| `OPERATOR_EMAIL` | No | Pre-fills the email field in the Chaos UI (fallback when `X-Forwarded-User` header is absent) |
+
+**Progress visibility:**
+
+- Each deployer step is logged at INFO level: `[auto-deploy:{scenario}] {step} — {status}`
+- The selector UI (`/`) detects an in-progress auto-deploy via `GET /api/setup/auto-deploy`
+  and automatically shows the progress panel without requiring the user to click Launch
+- The `/api/setup/auto-deploy` endpoint returns `{"in_progress": bool, "deployment_id": str|null}`
+
+**start.sh:** Uses `command -v python3` to resolve the active venv's Python rather than
+`/usr/bin/python3`. Do not use `sudo` — it resets PATH and loses the venv. If root is needed
+for port binding, use `sudo env PATH="$PATH" "$PYTHON" -m uvicorn ...` instead.
+
+### User Email Detection (`/api/user/info`)
+
+Priority order for auto-populating the operator email in the Chaos UI:
+
+1. `X-Forwarded-User` request header (set by reverse proxies — Okta SSO, OAuth2 Proxy, etc.)
+2. `OPERATOR_EMAIL` environment variable (useful in Instruqt, k8s, or any environment without SSO)
+
+```python
+email = request.headers.get("X-Forwarded-User", "") or os.environ.get("OPERATOR_EMAIL", "")
+```
+
+### Kibana Authentication Verification
+
+**CRITICAL:** Do NOT use `GET /api/status` to test Kibana connectivity with an API key — it is unauthenticated and will return 200 even with a wrong or missing API key.
+
+Use an auth-required endpoint instead:
+```
+GET {kibana_url}/api/spaces/space
+headers: {"Authorization": "ApiKey {api_key}", "kbn-xsrf": "true"}
+```
+Returns 200 with valid credentials, 401/403 with bad API key.
+
+### Test Connection Endpoint Pattern
+
+`POST /api/setup/test-connection` tests each component independently and returns per-component results:
+
+```json
+{
+  "kibana_ok": true,
+  "kibana_error": null,
+  "es_ok": true,
+  "es_error": null,
+  "elastic_url": "https://...",
+  "otlp_ok": false,
+  "otlp_error": "HTTP 401",
+  "otlp_endpoint": "https://..."
+}
+```
+
+The UI uses `kibana_ok`, `es_ok`, `otlp_ok` to set ✅/❌ indicators per field. A combined status string reads `Kibana: OK | Elasticsearch: OK | OTLP: Not verified`. Message color is red if ANY component failed (`anyFail = kibana_ok === false || es_ok === false || otlp_ok === false`).
+
+### UI Checkmark Clearing Rules
+
+The `clearConnChecks()` JS function must be wired to `oninput` on ALL four credential fields:
+- Kibana URL (`oninput="deriveUrls(); clearConnChecks()"`)
+- API Key (`oninput="clearConnChecks()"`)
+- Elasticsearch URL (`oninput="clearConnChecks()"`)
+- OTLP Endpoint (`oninput="clearConnChecks()"`)
+
+Missing `oninput` on the advanced fields (ES URL, OTLP) causes stale ✅/❌ to persist after the user edits those fields.
+
+### Field Repopulation on Test
+
+When the test returns a derived `elastic_url` or `otlp_endpoint`, repopulate empty fields OR fields the user hasn't manually edited:
+```javascript
+const esField = document.getElementById('es-url');
+if (data.elastic_url && (!esField.value || !esField.dataset.manual))
+    esField.value = data.elastic_url;
+```
+Use `dataset.manual = "1"` (set on manual edits) to distinguish user-typed values from auto-derived ones. Without the `!esField.value` guard, an empty field never repopulates if it previously had `dataset.manual` set.

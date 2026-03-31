@@ -79,7 +79,7 @@ class ScenarioDeployer(
             DeployStep("Clean up old artifacts"),       # 3
             DeployStep("Configure platform settings"),  # 4
             DeployStep("Generate APM rollup data"),     # 5
-            DeployStep("Deploy workflows", items_total=4),  # 6
+            DeployStep("Deploy workflows", items_total=5),  # 6
             DeployStep("Index knowledge base", items_total=20),  # 7
             DeployStep("Deploy AI agent tools", items_total=7),  # 8
             DeployStep("Create AI agent"),              # 9

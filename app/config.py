@@ -32,6 +32,8 @@ APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 
 # ── Active Scenario ───────────────────────────────────────────────────────
 ACTIVE_SCENARIO = os.getenv("ACTIVE_SCENARIO", "space")
+# True only when ACTIVE_SCENARIO is explicitly provided via the environment.
+ACTIVE_SCENARIO_SET = bool(os.getenv("ACTIVE_SCENARIO"))
 
 # ── Auto-deploy Credentials (optional) ───────────────────────────────────────
 # If set, the app will automatically deploy ACTIVE_SCENARIO on startup

@@ -36,6 +36,8 @@ class DashboardMixin:
                 try:
                     data = resp.json()
                     count = data.get("successCount", 0)
+                    step.items_total = count
+                    step.items_done = count
                     step.detail = f"Imported {count} objects ({self.scenario.scenario_name})"
                 except Exception:
                     step.detail = "Dashboard imported"

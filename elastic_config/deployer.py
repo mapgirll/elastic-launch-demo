@@ -84,7 +84,7 @@ class ScenarioDeployer(
             DeployStep("Deploy AI agent tools", items_total=7),  # 8
             DeployStep("Create AI agent"),              # 9
             DeployStep("Create significant events", items_total=20),  # 10
-            DeployStep("Create data views"),            # 11
+            DeployStep("Create data views", items_total=5),  # 11
             DeployStep("Import executive dashboard"),   # 12
             DeployStep("Create alert rules", items_total=20),  # 13
             DeployStep("Enable APM anomaly detection"), # 14

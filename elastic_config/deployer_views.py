@@ -65,6 +65,7 @@ class DataViewsMixin:
             },
         ]
 
+        step.items_total = len(views)
         created = 0
         for view in views:
             resp = client.post(
@@ -74,6 +75,8 @@ class DataViewsMixin:
             )
             if resp.status_code < 300:
                 created += 1
+                step.items_done = created
+                notify(self.progress)
 
         step.status = "ok"
         step.detail = f"Created {created} data views"

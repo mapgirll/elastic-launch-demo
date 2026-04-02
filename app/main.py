@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import (
     ACTIVE_SCENARIO,
+    ACTIVE_SCENARIO_SET,
     APP_HOST,
     APP_PORT,
     CHANNEL_REGISTRY,
@@ -87,9 +88,10 @@ async def lifespan(app: FastAPI):
             logger.exception("Failed to restore deployment %s", rec["deployment_id"])
             store.set_status(rec["deployment_id"], "error")
 
-    # Auto-deploy from environment variables if credentials are provided
-    # and the scenario is not already running from a restored SQLite record.
-    if KIBANA_URL and ELASTIC_API_KEY and not registry.get(ACTIVE_SCENARIO):
+    # Auto-deploy from environment variables if credentials AND an explicit
+    # scenario are provided, and the scenario is not already running from a
+    # restored SQLite record.
+    if KIBANA_URL and ELASTIC_API_KEY and ACTIVE_SCENARIO_SET and not registry.get(ACTIVE_SCENARIO):
         import threading
         from elastic_config.deployer import ScenarioDeployer
 
@@ -786,6 +788,15 @@ async def send_daily_update(body: dict):
 # ── Setup / Deployer API ───────────────────────────────────────────────────
 
 
+@app.get("/api/setup/env-creds")
+async def env_creds_status():
+    """Return whether Elastic credentials are configured via environment variables."""
+    return {
+        "has_env_creds": bool(KIBANA_URL and ELASTIC_API_KEY),
+        "scenario": ACTIVE_SCENARIO,
+    }
+
+
 @app.post("/api/setup/test-connection")
 async def test_connection(body: dict):
     """Test connectivity to each component independently."""
@@ -865,6 +876,13 @@ async def launch_setup(body: dict):
 
     scenario_id = body.get("scenario_id", ACTIVE_SCENARIO)
     _def_elastic, _def_kibana, _def_key = _get_default_creds()
+    # Fall back to env vars when the store has no persisted credentials
+    if not _def_kibana and KIBANA_URL:
+        _def_kibana = KIBANA_URL
+    if not _def_key and ELASTIC_API_KEY:
+        _def_key = ELASTIC_API_KEY
+    if not _def_elastic and ELASTIC_URL:
+        _def_elastic = ELASTIC_URL
     kibana_url = body.get("kibana_url", _def_kibana).strip().rstrip("/")
     api_key = body.get("api_key", _def_key).strip()
 

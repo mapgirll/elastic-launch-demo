@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Space+Mono:wght@400;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/chaos/static/style.css">
+    <link rel="stylesheet" href="/chaos/static/style.css?v=2">
     <!--THEME_CSS-->
 </head>
 <body>
@@ -158,6 +158,7 @@
     <script>
         window.SCENARIO_NAMESPACE = 'NAMESPACE_PLACEHOLDER';
         window.DEPLOYMENT_ID = 'DEPLOYMENT_ID_PLACEHOLDER';
+        window.KIBANA_URL = 'KIBANA_URL_PLACEHOLDER';
         (function() {
             var did = window.DEPLOYMENT_ID;
             if (!did) return;
@@ -165,6 +166,6 @@
             if (link) link.href = '/dashboard?deployment_id=' + encodeURIComponent(did);
         })();
     </script>
-    <script src="/chaos/static/app.js"></script>
+    <script src="/chaos/static/app.js?v=2"></script>
 </body>
 </html>

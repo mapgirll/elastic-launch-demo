@@ -36,7 +36,7 @@ POST /api/agent_builder/tools
 **Gotchas:**
 - `index_search` requires `configuration.pattern`, NOT `configuration.index` — returns 400 otherwise
 - `esql` requires `configuration.params: {}` even when empty — returns 400 otherwise
-- `workflow` requires `configuration.workflow_id` — discover via `POST /api/workflows/search`
+- `workflow` requires `configuration.workflow_id` — discover via `GET /api/workflows` (fallback to `POST /api/workflows/search` on 404/405)
 - No `name` field on tools — use `id` and `description` only
 
 ### Parameterized ES|QL Tools
@@ -260,6 +260,8 @@ fall back to the old path on 404/405, supporting both versions simultaneously.
 | Update | `PUT /api/workflows/{id}` | `PUT /api/workflows/workflow/{id}` |
 | Delete | `DELETE /api/workflows/{id}` | `DELETE /api/workflows/workflow/{id}` |
 | Run | `POST /api/workflows/{id}/run` | `POST /api/workflows/workflow/{id}/run` |
+
+**CRITICAL (`/api/daily-update`):** The `Send Daily Update` button in the Chaos UI calls `POST /api/daily-update` in `app/main.py`. This endpoint must use the same fallback pattern as the deployer's `_wf_search` and `_wf_create` helpers — try the new path first, fall back to old on 404/405. Using only the old path (`POST /api/workflows/search`) returns 404 on 9.4+ and shows "Workflow search failed: 404" in the UI. The run step similarly must try `POST /api/workflows/workflow/{id}/run` before falling back to `POST /api/workflows/{id}/run`.
 | Execution status | `GET /api/workflowExecutions/{id}` | `GET /api/workflows/executions/{id}` |
 
 **CRITICAL (9.4.0 breaking change):** `POST /api/workflows` is now the **bulk create** endpoint
@@ -907,19 +909,91 @@ hasn't been configured yet. Telemetry is dropped until `reconfigure()` is called
 
 ### Auto-Deploy from Environment Variables
 
-If `KIBANA_URL` and `ELASTIC_API_KEY` are set in `.env` (or as container env vars), the app
-automatically deploys `ACTIVE_SCENARIO` on startup without requiring UI interaction.
+If `KIBANA_URL`, `ELASTIC_API_KEY`, **and `ACTIVE_SCENARIO`** are all set in `.env` (or as
+container env vars), the app automatically deploys that scenario on startup without requiring
+UI interaction.
+
+**`ACTIVE_SCENARIO` must be explicitly set to trigger auto-deploy.** If it is absent (even
+though it defaults to `"space"` for runtime purposes), no auto-deploy runs. This is tracked via
+`ACTIVE_SCENARIO_SET = bool(os.getenv("ACTIVE_SCENARIO"))` in `app/config.py`.
 
 **Supported env vars:**
 
 | Variable | Required | Notes |
 | -------- | -------- | ----- |
-| `KIBANA_URL` | Yes | Triggers auto-deploy when set alongside `ELASTIC_API_KEY` |
+| `KIBANA_URL` | Yes | Must be set for auto-deploy and for the selector UI to skip the Connection Settings form |
 | `ELASTIC_API_KEY` | Yes | Used for all Elastic API calls |
-| `ACTIVE_SCENARIO` | No | Defaults to `space` |
+| `ACTIVE_SCENARIO` | **Yes (for auto-deploy)** | Must be explicitly set; omitting it suppresses auto-deploy even when creds are present |
 | `ELASTIC_URL` | No | Auto-derived from `KIBANA_URL` (`.kb.` → `.es.`) if not set |
 | `OTLP_ENDPOINT` | No | Auto-derived from ES URL if not set (see OTLP derivation above) |
+| `KIBANA_PROXY` | No | Hostname of a reverse proxy in front of Kibana; used for all user-facing links (see below) |
 | `OPERATOR_EMAIL` | No | Pre-fills the email field in the Chaos UI (fallback when `X-Forwarded-User` header is absent) |
+
+### Selector UI Behaviour with `.env` Credentials
+
+The selector UI (`/`) adapts based on whether credentials are pre-configured:
+
+- **Credentials present** (`KIBANA_URL` + `ELASTIC_API_KEY` in env): the Connection Settings
+  form is hidden. Selecting a scenario shows a "Ready to Launch" panel with only a Launch button.
+  The launch request sends only `scenario_id`; the backend fills in credentials from env vars
+  (falling back to env vars when the SQLite store has no persisted creds).
+- **No credentials**: the Connection Settings form is shown as normal.
+- **Already-deployed scenario**: clicking a card that is already running shows neither panel —
+  the deployment banner links (Landing, Dashboard, etc.) are sufficient.
+- **After successful deploy**: the "Ready to Launch" panel is hidden and the deployments banner
+  refreshes to show the running scenario.
+
+**API endpoint:** `GET /api/setup/env-creds` → `{"has_env_creds": bool, "scenario": str}`
+
+### Selector UI — Deployment Action Buttons
+
+Each active deployment in the selector UI (`app/selector/static/index.html`) shows a row of action buttons/links built from `d.*` fields returned by `/api/deployments`:
+
+| Button | Color | URL / Action |
+| ------ | ----- | ------------ |
+| Platform Overview | neutral (`--bg-input`) | `/slides?deployment_id=...` |
+| Landing | neutral | `/home?deployment_id=...` |
+| Dashboard | neutral | `/dashboard?deployment_id=...` |
+| Executive Dashboard | teal (`--teal`, black text) | `{d.kibana_display_url}/app/dashboards#/view/{d.namespace}-exec-dashboard` (new tab) |
+| Chaos | amber (`--amber`, black text) | `/chaos?deployment_id=...` |
+| Stop & Teardown | red (`--red`, white text) | JS `stopAndTeardown()` |
+
+**Executive Dashboard link** uses `d.kibana_display_url` (from `/api/deployments`), which is `KIBANA_PROXY or kibana_url`. This is the same URL pattern used by the slides page "Launch Demo" button (`KIBANA_URL_PLACEHOLDER/app/dashboards#/view/NAMESPACE_PLACEHOLDER-exec-dashboard`).
+
+### Kibana Proxy for User-Facing Links (`KIBANA_PROXY`)
+
+When Kibana is served via a reverse proxy (e.g. an Okta-protected gateway, an ngrok tunnel,
+or a corporate load balancer), the public URL differs from the real Kibana endpoint.
+`KIBANA_PROXY` separates these two concerns:
+
+- **`KIBANA_URL`** — always the real Kibana host; used for all internal API calls (deployer, workflow engine, auth checks, etc.)
+- **`KIBANA_PROXY`** — the public-facing URL; used only where a human will click
+
+**Affected surfaces (all fall back to `KIBANA_URL` when `KIBANA_PROXY` is unset):**
+
+| Surface | Mechanism |
+| ------- | --------- |
+| Landing page links (Dashboard, Observability Overview, Agent Builder) | `KIBANA_URL_PLACEHOLDER` → `_inject_theme()` → `kibana_display` |
+| Slides page "Launch Demo" button | Same `_inject_theme()` path |
+| Chaos UI active channel cards (ALERTS, CASES buttons) | `KIBANA_URL_PLACEHOLDER` → `_inject_theme()` → `window.KIBANA_URL` in JS |
+| Notification workflow email (significant event alert) | `__KIBANA_URL__` template var in YAML |
+| AI agent system prompt (`## Mission Context`) | `self.kibana_display_url` in `_generate_system_prompt()` |
+
+**Implementation:**
+
+- `app/config.py` — `KIBANA_PROXY = os.getenv("KIBANA_PROXY", "").strip().rstrip("/")`
+- `app/main.py` — `_inject_theme()` computes `kibana_display = KIBANA_PROXY or kibana` and substitutes `KIBANA_URL_PLACEHOLDER`
+- `elastic_config/deployer.py` — `ScenarioDeployer.__init__` accepts `kibana_proxy` param, sets `self.kibana_display_url = kibana_proxy or self.kibana_url`
+- `elastic_config/deployer_workflows.py` — adds `yaml_content.replace("__KIBANA_URL__", self.kibana_display_url)` alongside other template substitutions
+- Workflow YAML template `significant_event_notification.yaml` — uses `__KIBANA_URL__` in the email body
+- `elastic_config/deployer_agent.py` — includes `self.kibana_display_url` in `**Kibana URL**` line of agent system prompt
+
+**Gotcha:** `KIBANA_PROXY` affects only user-visible links. It is never used for any HTTP request the
+app makes to Kibana. Do not set it as a replacement for `KIBANA_URL` — both must be set when using a proxy.
+
+**Protocol normalization:** `KIBANA_PROXY` can be set with or without `https://`. `app/config.py` normalizes it at load time — if the value has no `http://` or `https://` prefix, `https://` is prepended automatically. Without this, a bare hostname like `o11y-launch-demo.kb.us-west2.gcp.elastic-cloud.com` produces relative URLs in the browser (navigating to localhost instead of Kibana).
+
+**Selector UI (`/api/deployments`):** The `/api/deployments` endpoint now includes a `kibana_display_url` field (= `KIBANA_PROXY or kibana_url`) alongside `kibana_url`. JavaScript in `app/selector/static/index.html` uses `d.kibana_display_url` for the Executive Dashboard link so it respects the proxy.
 
 **Progress visibility:**
 
@@ -941,6 +1015,45 @@ Priority order for auto-populating the operator email in the Chaos UI:
 
 ```python
 email = request.headers.get("X-Forwarded-User", "") or os.environ.get("OPERATOR_EMAIL", "")
+```
+
+### Chaos UI — Active Channel Card Structure
+
+Each active fault channel is rendered as a card in the Active Channels panel (`app/chaos_ui/static/app.js` → `updateActiveChannels()`). The card layout is:
+
+```
+ac-header       (channel number + elapsed time)
+ac-name         (fault name)
+ac-subsystem    (subsystem | affected services)
+ac-expiry       (auto-expires countdown)
+ac-owner-tag    (shown only when channel is owned by another session)
+ac-action-row   (flex row containing all action buttons)
+  └─ ac-resolve-btn   RESOLVE (enabled only for the owning session)
+  └─ ac-kibana-btn    ALERTS  (links to Observability Alerts page)
+  └─ ac-kibana-btn    CASES   (links to Observability Cases page)
+```
+
+**Kibana link URLs** (template URLs baked into `app.js`, prefixed with `window.KIBANA_URL`):
+
+- Alerts: `/app/observability/alerts?_a=(controlConfigs:!(...),rangeFrom:now-2m,rangeTo:now)` — pre-filtered to active alerts, 2-minute window
+- Cases: `/app/observability/cases?cases=(from:now-30d,page:1,perPage:10,sortField:createdAt,sortOrder:desc,to:now)`
+
+`window.KIBANA_URL` is injected by `_inject_theme()` via `KIBANA_URL_PLACEHOLDER` in `app/chaos_ui/static/index.html`, so it automatically respects `KIBANA_PROXY`. The ALERTS and CASES buttons always render regardless of whether `KIBANA_URL` is populated.
+
+**CSS classes** (`app/chaos_ui/static/style.css`):
+
+- `.ac-action-row` — flex row, `gap: 6px`, `flex-wrap: wrap`, `margin-top: 10px`
+- `.ac-kibana-btn` — transparent background, muted border (`--text-secondary`), monospace font, hover brightens to `--text-primary`
+
+### Chaos UI Static Asset Cache-Busting
+
+The chaos page HTML is served dynamically (read from disk at request time in `GET /chaos`), but its JS and CSS are served as static files by FastAPI's `StaticFiles` mount. Browsers aggressively cache static files.
+
+When updating `app/chaos_ui/static/app.js` or `style.css`, increment the `?v=N` query parameter on the corresponding `<script src>` and `<link rel="stylesheet" href>` tags in `app/chaos_ui/static/index.html`. Because `index.html` is read fresh on every request, the new version query string is served immediately without a server restart, forcing browsers to fetch the updated assets.
+
+```html
+<link rel="stylesheet" href="/chaos/static/style.css?v=2">
+<script src="/chaos/static/app.js?v=2"></script>
 ```
 
 ### Kibana Authentication Verification

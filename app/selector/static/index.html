@@ -455,6 +455,25 @@
         </div>
     </div>
 
+    <!-- Env-creds Launch Panel (shown instead of connection panel when creds come from .env) -->
+    <div class="connection">
+        <div class="connection-panel" id="env-launch-panel" style="display:none;">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;">
+                <span style="font-size:18px;">&#128274;</span>
+                <div>
+                    <h2 style="margin:0;">Ready to Launch</h2>
+                    <p style="font-size:13px;color:var(--text-dim);margin:4px 0 0;">Connection credentials are pre-configured via environment variables.</p>
+                </div>
+            </div>
+            <div class="btn-row">
+                <button class="btn btn-primary" onclick="launchScenario()" id="env-launch-btn" disabled>
+                    <span class="btn-icon">&#9654;</span>Launch
+                </button>
+                <span class="status-msg" id="env-status-msg"></span>
+            </div>
+        </div>
+    </div>
+
     <!-- Connection Panel -->
     <div class="connection">
         <div class="connection-panel" id="connection-panel">
@@ -518,8 +537,17 @@
     let scenarios = [];
     let selectedScenario = null;
     let activeDeployments = [];
+    let envCreds = false;
 
     async function init() {
+        // Check if credentials are pre-configured via .env
+        try {
+            const cfg = await (await fetch('/api/setup/env-creds')).json();
+            envCreds = cfg.has_env_creds || false;
+        } catch (e) {
+            envCreds = false;
+        }
+
         // Load scenarios
         try {
             scenarios = await (await fetch('/api/scenarios')).json();
@@ -583,9 +611,11 @@
                     </div>
                 </div>
                 <div style="display: flex; gap: 10px; align-items: center;">
-                    <a href="/home?deployment_id=${d.deployment_id}" style="color: var(--teal); font-size: 13px; text-decoration: none;">Landing</a>
-                    <a href="/dashboard?deployment_id=${d.deployment_id}" style="color: var(--teal); font-size: 13px; text-decoration: none;">Dashboard</a>
-                    <a href="/chaos?deployment_id=${d.deployment_id}" style="color: var(--teal); font-size: 13px; text-decoration: none;">Chaos</a>
+                    <a href="/slides?deployment_id=${d.deployment_id}" style="background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; text-decoration: none;">Platform Overview</a>
+                    <a href="/home?deployment_id=${d.deployment_id}" style="background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; text-decoration: none;">Landing</a>
+                    <a href="/dashboard?deployment_id=${d.deployment_id}" style="background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; text-decoration: none;">Dashboard</a>
+                    <a href="${d.kibana_display_url}/app/dashboards#/view/${d.namespace}-exec-dashboard" target="_blank" rel="noopener" style="background: var(--teal); color: #000; border: 1px solid var(--teal); border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; text-decoration: none;">Executive Dashboard</a>
+                    <a href="/chaos?deployment_id=${d.deployment_id}" style="background: var(--amber); color: #000; border: 1px solid var(--amber); border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; text-decoration: none;">Chaos</a>
                     <button onclick="stopAndTeardown('${d.deployment_id}')" style="background: var(--red); color: #fff;
                             border: none; border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 600;
                             cursor: pointer; font-family: inherit;">Stop &amp; Teardown</button>
@@ -621,8 +651,15 @@
         document.querySelectorAll('.scenario-card').forEach(c => {
             c.classList.toggle('selected', c.dataset.id === id);
         });
-        document.getElementById('connection-panel').classList.add('visible');
-        document.getElementById('launch-btn').disabled = false;
+        const alreadyDeployed = activeDeployments.some(d => d.scenario_id === id && d.running);
+        if (envCreds && !alreadyDeployed) {
+            document.getElementById('env-launch-panel').style.display = 'block';
+            document.getElementById('env-launch-btn').disabled = false;
+            document.getElementById('connection-panel').classList.remove('visible');
+        } else if (!envCreds && !alreadyDeployed) {
+            document.getElementById('connection-panel').classList.add('visible');
+            document.getElementById('launch-btn').disabled = false;
+        }
     }
 
     function deriveUrls() {
@@ -729,35 +766,49 @@
     async function launchScenario() {
         if (!selectedScenario) return;
 
-        const kibanaUrl = document.getElementById('kibana-url').value.trim();
-        const apiKey = document.getElementById('api-key').value.trim();
-        const esUrl = document.getElementById('es-url').value.trim() || undefined;
-        const otlpUrl = document.getElementById('otlp-url').value.trim() || undefined;
+        const usingEnvCreds = envCreds;
+        const launchBtnId = usingEnvCreds ? 'env-launch-btn' : 'launch-btn';
+        const statusMsgId = usingEnvCreds ? 'env-status-msg' : 'status-msg';
+        const launchBtn = document.getElementById(launchBtnId);
 
-        if (!kibanaUrl && !apiKey) {
-            window.location.href = '/home?deployment_id=' + selectedScenario;
-            return;
+        let kibanaUrl, apiKey, esUrl, otlpUrl;
+        if (usingEnvCreds) {
+            // Credentials come from .env — send only scenario_id
+            kibanaUrl = '';
+            apiKey = '';
+            esUrl = undefined;
+            otlpUrl = undefined;
+        } else {
+            kibanaUrl = document.getElementById('kibana-url').value.trim();
+            apiKey = document.getElementById('api-key').value.trim();
+            esUrl = document.getElementById('es-url').value.trim() || undefined;
+            otlpUrl = document.getElementById('otlp-url').value.trim() || undefined;
+
+            if (!kibanaUrl && !apiKey) {
+                window.location.href = '/home?deployment_id=' + selectedScenario;
+                return;
+            }
         }
 
-        const launchBtn = document.getElementById('launch-btn');
         launchBtn.disabled = true;
         launchBtn.textContent = 'Deploying...';
 
         try {
+            const body = { scenario_id: selectedScenario };
+            if (!usingEnvCreds) {
+                body.kibana_url = kibanaUrl;
+                body.api_key = apiKey;
+                if (esUrl) body.elastic_url = esUrl;
+                if (otlpUrl) body.otlp_url = otlpUrl;
+            }
             const resp = await fetch('/api/setup/launch', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    scenario_id: selectedScenario,
-                    kibana_url: kibanaUrl,
-                    api_key: apiKey,
-                    elastic_url: esUrl,
-                    otlp_url: otlpUrl,
-                }),
+                body: JSON.stringify(body),
             });
             const data = await resp.json();
             if (data.error) {
-                const msg = document.getElementById('status-msg');
+                const msg = document.getElementById(statusMsgId);
                 msg.textContent = 'Launch failed: ' + data.error;
                 msg.className = 'status-msg visible err';
                 launchBtn.disabled = false;
@@ -768,7 +819,7 @@
             document.getElementById('progress-panel').classList.add('visible');
             pollProgress(data.deployment_id || selectedScenario);
         } catch (e) {
-            const msg = document.getElementById('status-msg');
+            const msg = document.getElementById(statusMsgId);
             msg.textContent = 'Launch error: ' + e.message;
             msg.className = 'status-msg visible err';
             launchBtn.disabled = false;
@@ -806,14 +857,14 @@
             renderProgress(data);
 
             if (data.finished) {
-                const launchBtn = document.getElementById('launch-btn');
+                const launchBtnId = envCreds ? 'env-launch-btn' : 'launch-btn';
+                const launchBtn = document.getElementById(launchBtnId);
                 if (data.error) {
                     launchBtn.textContent = 'Retry';
                     launchBtn.disabled = false;
                 } else {
-                    launchBtn.innerHTML = '<span class="btn-icon">&#10003;</span>Complete — Go to Dashboard';
-                    launchBtn.disabled = false;
-                    launchBtn.onclick = () => { window.location.href = '/home?deployment_id=' + (deploymentId || selectedScenario); };
+                    document.getElementById('env-launch-panel').style.display = 'none';
+                    document.getElementById('connection-panel').classList.remove('visible');
                     refreshDeployments();
                 }
                 return;

@@ -32,11 +32,17 @@ APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 
 # ── Active Scenario ───────────────────────────────────────────────────────
 ACTIVE_SCENARIO = os.getenv("ACTIVE_SCENARIO", "space")
+# True only when ACTIVE_SCENARIO is explicitly provided via the environment.
+ACTIVE_SCENARIO_SET = bool(os.getenv("ACTIVE_SCENARIO"))
 
 # ── Auto-deploy Credentials (optional) ───────────────────────────────────────
 # If set, the app will automatically deploy ACTIVE_SCENARIO on startup
 # without requiring manual input via the UI.
 KIBANA_URL = os.getenv("KIBANA_URL", "")
+_kibana_proxy_raw = os.getenv("KIBANA_PROXY", "").strip().rstrip("/")
+if _kibana_proxy_raw and not _kibana_proxy_raw.startswith(("http://", "https://")):
+    _kibana_proxy_raw = "https://" + _kibana_proxy_raw
+KIBANA_PROXY = _kibana_proxy_raw
 ELASTIC_API_KEY = os.getenv("ELASTIC_API_KEY", "")
 ELASTIC_URL = os.getenv("ELASTIC_URL", "")
 

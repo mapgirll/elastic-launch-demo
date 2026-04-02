@@ -151,6 +151,7 @@ class AgentMixin:
 ## Mission Context
 - **Scenario**: {scenario.scenario_name}
 - **Namespace**: {scenario.namespace}
+- **Kibana URL**: {self.kibana_display_url}
 - **Subsystems**: {', '.join(subsystems)}
 - **Services**:
 {svc_list}

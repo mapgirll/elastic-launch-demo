@@ -442,6 +442,40 @@ body {
     color: var(--text-dim);
 }
 
+.active-channel-card .ac-action-row {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+    flex-wrap: wrap;
+}
+
+.active-channel-card .ac-action-row .ac-resolve-btn {
+    margin-top: 0;
+}
+
+.active-channel-card .ac-kibana-btn {
+    background: transparent;
+    border: 1px solid var(--text-secondary);
+    color: var(--text-secondary);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    padding: 6px 10px;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.2s;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+}
+
+.active-channel-card .ac-kibana-btn:hover {
+    background: rgba(136, 136, 136, 0.15);
+    border-color: var(--text-primary);
+    color: var(--text-primary);
+}
+
 .ac-owner-tag {
     font-size: 9px;
     letter-spacing: 2px;

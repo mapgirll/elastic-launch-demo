@@ -68,6 +68,7 @@ class WorkflowsMixin:
             yaml_content = yaml_content.replace("__SCENARIO_NAME__", scenario_name)
             yaml_content = yaml_content.replace("__AGENT_ID__", agent_id)
             yaml_content = yaml_content.replace("__NS__", ns)
+            yaml_content = yaml_content.replace("__KIBANA_URL__", self.kibana_display_url)
             key = fname.replace(".yaml", "")
             workflows[key] = yaml_content
 

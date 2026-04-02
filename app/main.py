@@ -14,11 +14,13 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import (
     ACTIVE_SCENARIO,
+    ACTIVE_SCENARIO_SET,
     APP_HOST,
     APP_PORT,
     CHANNEL_REGISTRY,
     ELASTIC_API_KEY,
     ELASTIC_URL,
+    KIBANA_PROXY,
     KIBANA_URL,
     MISSION_ID,
     MISSION_NAME,
@@ -87,9 +89,10 @@ async def lifespan(app: FastAPI):
             logger.exception("Failed to restore deployment %s", rec["deployment_id"])
             store.set_status(rec["deployment_id"], "error")
 
-    # Auto-deploy from environment variables if credentials are provided
-    # and the scenario is not already running from a restored SQLite record.
-    if KIBANA_URL and ELASTIC_API_KEY and not registry.get(ACTIVE_SCENARIO):
+    # Auto-deploy from environment variables if credentials AND an explicit
+    # scenario are provided, and the scenario is not already running from a
+    # restored SQLite record.
+    if KIBANA_URL and ELASTIC_API_KEY and ACTIVE_SCENARIO_SET and not registry.get(ACTIVE_SCENARIO):
         import threading
         from elastic_config.deployer import ScenarioDeployer
 
@@ -115,7 +118,7 @@ async def lifespan(app: FastAPI):
         )
 
         scenario = get_scenario(scenario_id)
-        deployer = ScenarioDeployer(scenario, elastic_url, kibana_url, api_key)
+        deployer = ScenarioDeployer(scenario, elastic_url, kibana_url, api_key, KIBANA_PROXY)
         deployment_id = scenario_id
 
         def _progress_cb(progress):
@@ -229,6 +232,8 @@ def _inject_theme(html: str, deployment_id: Optional[str] = None) -> str:
         mission_id = MISSION_ID
         kibana = _get_default_creds()[1]
 
+    kibana_display = KIBANA_PROXY or kibana
+
     theme = scenario.theme
 
     # Build CSS that maps theme vars to the variable names used in existing stylesheets
@@ -255,7 +260,7 @@ body {{ font-family: {theme.font_family}; }}"""
         "DASHBOARD_TITLE_PLACEHOLDER": theme.dashboard_title,
         "CHAOS_TITLE_PLACEHOLDER": theme.chaos_title,
         "LANDING_TITLE_PLACEHOLDER": theme.landing_title,
-        "KIBANA_URL_PLACEHOLDER": kibana,
+        "KIBANA_URL_PLACEHOLDER": kibana_display,
     }
     for placeholder, value in replacements.items():
         html = html.replace(placeholder, value)
@@ -478,6 +483,7 @@ async def list_deployments():
                 "namespace": inst.ctx.namespace,
                 "running": inst.running,
                 "kibana_url": inst.ctx.kibana_url,
+                "kibana_display_url": KIBANA_PROXY or inst.ctx.kibana_url,
             }
         )
     return result
@@ -736,12 +742,17 @@ async def send_daily_update(body: dict):
     }
 
     async with _httpx.AsyncClient(timeout=30) as client:
-        # Find the workflow by name
-        search_resp = await client.post(
-            f"{kibana_url}/api/workflows/search",
+        # Find the workflow by name — try GET first, fall back to POST search
+        search_resp = await client.get(
+            f"{kibana_url}/api/workflows",
             headers=headers,
-            json={"page": 1, "size": 100},
         )
+        if search_resp.status_code in (404, 405):
+            search_resp = await client.post(
+                f"{kibana_url}/api/workflows/search",
+                headers=headers,
+                json={"page": 1, "size": 100},
+            )
         if search_resp.status_code >= 300:
             return JSONResponse(
                 status_code=502,
@@ -749,7 +760,7 @@ async def send_daily_update(body: dict):
             )
 
         search_data = search_resp.json()
-        workflows = search_data.get("results", search_data.get("data", []))
+        workflows = search_data if isinstance(search_data, list) else search_data.get("results", search_data.get("items", []))
         wf_id = None
         for wf in workflows:
             if "Daily Update Report" in wf.get("name", ""):
@@ -764,12 +775,18 @@ async def send_daily_update(body: dict):
                 },
             )
 
-        # Trigger the workflow
+        # Trigger the workflow — try new path first, fall back to old
         run_resp = await client.post(
-            f"{kibana_url}/api/workflows/{wf_id}/run",
+            f"{kibana_url}/api/workflows/workflow/{wf_id}/run",
             headers=headers,
             json={"inputs": {"email": email}},
         )
+        if run_resp.status_code in (404, 405):
+            run_resp = await client.post(
+                f"{kibana_url}/api/workflows/{wf_id}/run",
+                headers=headers,
+                json={"inputs": {"email": email}},
+            )
         if run_resp.status_code >= 300:
             return JSONResponse(
                 status_code=502,
@@ -784,6 +801,15 @@ async def send_daily_update(body: dict):
 
 
 # ── Setup / Deployer API ───────────────────────────────────────────────────
+
+
+@app.get("/api/setup/env-creds")
+async def env_creds_status():
+    """Return whether Elastic credentials are configured via environment variables."""
+    return {
+        "has_env_creds": bool(KIBANA_URL and ELASTIC_API_KEY),
+        "scenario": ACTIVE_SCENARIO,
+    }
 
 
 @app.post("/api/setup/test-connection")
@@ -865,6 +891,13 @@ async def launch_setup(body: dict):
 
     scenario_id = body.get("scenario_id", ACTIVE_SCENARIO)
     _def_elastic, _def_kibana, _def_key = _get_default_creds()
+    # Fall back to env vars when the store has no persisted credentials
+    if not _def_kibana and KIBANA_URL:
+        _def_kibana = KIBANA_URL
+    if not _def_key and ELASTIC_API_KEY:
+        _def_key = ELASTIC_API_KEY
+    if not _def_elastic and ELASTIC_URL:
+        _def_elastic = ELASTIC_URL
     kibana_url = body.get("kibana_url", _def_kibana).strip().rstrip("/")
     api_key = body.get("api_key", _def_key).strip()
 
@@ -880,7 +913,7 @@ async def launch_setup(body: dict):
     explicit_otlp = body.get("otlp_url") or ""
 
     scenario = _get_scenario_by_id(scenario_id)
-    deployer = ScenarioDeployer(scenario, elastic_url, kibana_url, api_key)
+    deployer = ScenarioDeployer(scenario, elastic_url, kibana_url, api_key, KIBANA_PROXY)
 
     # Use scenario_id as deployment_id
     deployment_id = scenario_id

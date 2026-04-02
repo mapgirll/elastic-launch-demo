@@ -58,11 +58,15 @@ class ScenarioDeployer(
         elastic_url: str,
         kibana_url: str,
         api_key: str,
+        kibana_proxy: str = "",
     ):
         self.scenario = scenario
         self.elastic_url = elastic_url.strip().rstrip("/")
         self.kibana_url = kibana_url.strip().rstrip("/")
         self.api_key = api_key.strip()
+        # kibana_display_url is used in user-facing links (workflows, agent, slides).
+        # Falls back to the real kibana_url if no proxy is configured.
+        self.kibana_display_url = kibana_proxy.strip().rstrip("/") or self.kibana_url
         self.ns = scenario.namespace
         self.progress = DeployProgress()
         self._workflow_ids: dict[str, str] = {}  # name fragment -> workflow ID
@@ -84,7 +88,7 @@ class ScenarioDeployer(
             DeployStep("Deploy AI agent tools", items_total=7),  # 8
             DeployStep("Create AI agent"),              # 9
             DeployStep("Create significant events", items_total=20),  # 10
-            DeployStep("Create data views"),            # 11
+            DeployStep("Create data views", items_total=5),  # 11
             DeployStep("Import executive dashboard"),   # 12
             DeployStep("Create alert rules", items_total=20),  # 13
             DeployStep("Enable APM anomaly detection"), # 14

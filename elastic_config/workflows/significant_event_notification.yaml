@@ -50,7 +50,8 @@ steps:
 
         An AI root cause analysis is underway — a case with detailed findings will be created shortly.
 
-        Open Kibana to investigate and request remediation.
+        Open Kibana to investigate and request remediation:
+        __KIBANA_URL__/app/dashboards#/view/__NS__-exec-dashboard
 
   - name: run_rca
     type: ai.agent

@@ -17,7 +17,6 @@ from elastic_config.deployer_base import (
     DeployStep,
     DeployProgress,
     ProgressCallback,
-    WIRED_LOGS_STREAM,
     _kibana_headers,
     _es_headers,
 )
@@ -566,10 +565,8 @@ class ScenarioDeployer(
 
         # Delete stream queries with ANY known namespace prefix
         try:
-            stream = WIRED_LOGS_STREAM
-            base = self.kibana_url.rstrip("/")
             resp = client.get(
-                f"{base}/api/streams/{stream}/queries",
+                f"{self.kibana_url}/api/streams/logs.otel/queries",
                 headers=_kibana_headers(self.api_key),
             )
             if resp.status_code < 300:
@@ -580,7 +577,7 @@ class ScenarioDeployer(
                     for ns in all_namespaces:
                         if qid.startswith(f"{ns}-se-"):
                             client.delete(
-                                f"{base}/api/streams/{stream}/queries/{qid}",
+                                f"{self.kibana_url}/api/streams/logs.otel/queries/{qid}",
                                 headers=_kibana_headers(self.api_key),
                             )
                             deleted += 1

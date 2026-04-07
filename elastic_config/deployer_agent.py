@@ -162,7 +162,7 @@ class AgentMixin:
 - Log message field is `body.text` — NEVER use `body` alone (causes "Unknown column [body]")
 - NEVER use `message` — this field DOES NOT EXIST. The correct field is `body.text`
 - Service name field is `service.name`
-- Always query FROM logs,logs.* (includes sub-streams)
+- Always query FROM logs.otel,logs.otel.* (includes sub-streams)
 - Use LIKE or KQL() for text matching — NEVER use MATCH()
 
 ## Tool Selection Guide

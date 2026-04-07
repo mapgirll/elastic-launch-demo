@@ -330,7 +330,7 @@ class BaseScenario(ABC):
                     "params": {
                         "error_type": {
                             "description": f"Wildcard pattern for the error type, e.g. *{example_error}*",
-                            "type": "string",
+                            "type": "text",
                             "optional": False,
                         }
                     },
@@ -377,7 +377,7 @@ class BaseScenario(ABC):
                     "params": {
                         "service_name": {
                             "description": f"The service to investigate ({svc_names})",
-                            "type": "string",
+                            "type": "text",
                             "optional": False,
                         }
                     },

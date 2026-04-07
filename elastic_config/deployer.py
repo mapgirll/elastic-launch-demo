@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import time
+from urllib.parse import quote
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -96,11 +97,13 @@ class ScenarioDeployer:
         self.progress = DeployProgress()
         self._workflow_ids: dict[str, str] = {}  # name fragment -> workflow ID
         self._created_tool_ids: list[str] = []   # tools that were actually created
+        self._wired_logs_stream: str | None = None  # Kibana stream name for /api/streams/{name}/queries/*
 
     # ── Public API ─────────────────────────────────────────────────────
 
     def deploy_all(self, callback: ProgressCallback | None = None) -> DeployProgress:
         """Run the full deployment pipeline.  Returns progress summary."""
+        self._wired_logs_stream = None
         self.progress = DeployProgress(steps=[
             DeployStep("Connectivity check"),           # 0
             DeployStep("Derive OTLP endpoint"),         # 1
@@ -449,6 +452,66 @@ class ScenarioDeployer:
                 return resp.status_code == 200
         except Exception:
             return False
+
+    # ── Wired streams (Kibana 9.x) ───────────────────────────────────
+
+    def _wired_logs_stream_name(self, client: httpx.Client) -> str:
+        """Resolve stream name for significant-event queries (GET/POST .../queries).
+
+        Agent Builder docs use ``/api/streams/{name}/queries``; the wired OTLP stream
+        may be ``logs``, ``logs.otel``, or ``logs.ecs`` depending on stack version.
+        """
+        if self._wired_logs_stream is not None:
+            return self._wired_logs_stream
+
+        hdr = _kibana_headers(self.api_key)
+        candidates: list[str] = []
+
+        try:
+            resp = client.get(f"{self.kibana_url}/api/streams", headers=hdr)
+            if resp.status_code < 300:
+                data = resp.json()
+                raw = data if isinstance(data, list) else data.get(
+                    "streams", data.get("results", data.get("data", []))
+                )
+                for item in raw:
+                    name = item.get("name", item) if isinstance(item, dict) else item
+                    if isinstance(name, str) and name.startswith("logs") and name not in candidates:
+                        candidates.append(name)
+        except Exception:
+            pass
+
+        for fallback in ("logs", "logs.otel", "logs.ecs"):
+            if fallback not in candidates:
+                candidates.append(fallback)
+
+        def _stream_probe_rank(n: str) -> tuple[int, str]:
+            return (
+                {"logs": 0, "logs.otel": 1, "logs.ecs": 2}.get(n, 9),
+                n,
+            )
+
+        candidates = sorted(set(candidates), key=_stream_probe_rank)
+
+        for name in candidates:
+            enc = quote(name, safe="")
+            try:
+                r = client.get(
+                    f"{self.kibana_url}/api/streams/{enc}/queries",
+                    headers=hdr,
+                )
+                if r.status_code < 300:
+                    self._wired_logs_stream = name
+                    logger.info("Streams queries API: using wired stream %r", name)
+                    return name
+            except Exception:
+                continue
+
+        self._wired_logs_stream = "logs"
+        logger.warning(
+            "Could not probe GET /api/streams/*/queries; defaulting stream name to 'logs'"
+        )
+        return self._wired_logs_stream
 
     # ── Platform Settings ──────────────────────────────────────────────
 
@@ -1169,16 +1232,25 @@ When the user asks you to fix or remediate this issue, use remediation_action to
         step.items_total = len(operations)
 
         if operations:
+            stream = self._wired_logs_stream_name(client)
+            enc = quote(stream, safe="")
             resp = client.post(
-                f"{self.kibana_url}/api/streams/logs/queries/_bulk",
+                f"{self.kibana_url}/api/streams/{enc}/queries/_bulk",
                 headers=_kibana_headers(self.api_key),
                 json={"operations": operations},
             )
             if resp.status_code < 300:
                 step.items_done = len(operations)
-                step.detail = f"Created {len(operations)} stream queries"
+                step.detail = f"Created {len(operations)} stream queries on {stream!r}"
             else:
-                step.detail = f"Bulk create failed (HTTP {resp.status_code})"
+                step.detail = (
+                    f"Bulk create failed on stream {stream!r} (HTTP {resp.status_code})"
+                )
+                logger.warning(
+                    "Significant events bulk failed stream=%r: %s",
+                    stream,
+                    resp.text[:500],
+                )
 
         step.status = "ok" if step.items_done > 0 else "failed"
         notify(self.progress)
@@ -1488,8 +1560,10 @@ When the user asks you to fix or remediate this issue, use remediation_action to
 
         # Delete stream queries with ANY known namespace prefix
         try:
+            stream = self._wired_logs_stream_name(client)
+            enc = quote(stream, safe="")
             resp = client.get(
-                f"{self.kibana_url}/api/streams/logs/queries",
+                f"{self.kibana_url}/api/streams/{enc}/queries",
                 headers=_kibana_headers(self.api_key),
             )
             if resp.status_code < 300:
@@ -1499,8 +1573,9 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                     qid = q.get("id", "")
                     for ns in all_namespaces:
                         if qid.startswith(f"{ns}-se-"):
+                            qe = quote(qid, safe="")
                             client.delete(
-                                f"{self.kibana_url}/api/streams/logs/queries/{qid}",
+                                f"{self.kibana_url}/api/streams/{enc}/queries/{qe}",
                                 headers=_kibana_headers(self.api_key),
                             )
                             deleted += 1
@@ -1725,8 +1800,10 @@ When the user asks you to fix or remediate this issue, use remediation_action to
     def _cleanup_significant_events(self, client: httpx.Client):
         """Delete stream queries for this namespace."""
         try:
+            stream = self._wired_logs_stream_name(client)
+            enc = quote(stream, safe="")
             resp = client.get(
-                f"{self.kibana_url}/api/streams/logs/queries",
+                f"{self.kibana_url}/api/streams/{enc}/queries",
                 headers=_kibana_headers(self.api_key),
             )
             if resp.status_code < 300:
@@ -1735,8 +1812,9 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                 for q in queries:
                     qid = q.get("id", "")
                     if qid.startswith(f"{self.ns}-se-"):
+                        qe = quote(qid, safe="")
                         client.delete(
-                            f"{self.kibana_url}/api/streams/logs/queries/{qid}",
+                            f"{self.kibana_url}/api/streams/{enc}/queries/{qe}",
                             headers=_kibana_headers(self.api_key),
                         )
         except Exception:

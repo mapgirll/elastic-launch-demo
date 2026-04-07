@@ -15,14 +15,14 @@ steps:
     type: elasticsearch.esql.query
     with:
       query: >
-        FROM logs.otel,logs.otel.* | WHERE KQL("body.text: \"{{ event.rule.tags[1] }}\" AND severity_text: \"ERROR\"") | KEEP event_name
+        FROM logs,logs.* | WHERE KQL("body.text: \"{{ event.rule.tags[1] }}\" AND severity_text: \"ERROR\"") | KEEP event_name
       format: json
 
   - name: count_errors
     type: elasticsearch.esql.query
     with:
       query: >
-        FROM logs.otel,logs.otel.*
+        FROM logs,logs.*
         | WHERE @timestamp > NOW() - 15 MINUTES AND severity_text == "ERROR"
         | STATS total_errors = COUNT(*)
       format: json

@@ -20,7 +20,7 @@ POST /api/agent_builder/tools
     "params": {
       "error_type": {
         "description": "Wildcard pattern, e.g. *FuelPressureException*",
-        "type": "string",
+        "type": "text",
         "optional": false
       }
     }
@@ -53,12 +53,12 @@ ES|QL tools support named parameters so the LLM only provides values, not query 
 "params": {
   "param_name": {
     "description": "Shown to LLM as parameter description",
-    "type": "string",
+    "type": "text",
     "optional": false
   }
 }
 ```
-- `type`: `"string"` (other types TBD)
+- `type`: use **`"text"`** for string-like ES|QL parameters — **`"string"`** returns 400 (`expected value to equal [text]`) on current Agent Builder validation
 - `optional`: `false` = required, `true` = optional
 - Agent Builder auto-generates a JSON Schema from params and exposes it to the LLM
 
@@ -483,7 +483,7 @@ All Streams endpoints require both:
         "title": "Human-readable title",
         "description": "",
         "esql": {
-          "query": "FROM logs.otel,logs.otel.* METADATA _id, _source | WHERE body.text LIKE \"*ERROR_CODE*\" AND severity_text == \"ERROR\""
+          "query": "FROM logs,logs.* METADATA _id, _source | WHERE body.text LIKE \"*ERROR_CODE*\" AND severity_text == \"ERROR\""
         }
       }
     }
@@ -494,7 +494,7 @@ All Streams endpoints require both:
 **Gotchas:**
 
 - `description` is **REQUIRED** as of 9.4.0 — omitting it returns 400 `invalid_union` ZodError; an empty string `""` is acceptable
-- The `esql` field (object with `query` string) is the current supported format — use `FROM logs.otel,logs.otel.*` for OTLP log streams
+- The `esql` field (object with `query` string) is the current supported format — use `FROM logs,logs.*` for wired OTLP logs (Stack 9.2–9.3); use `logs.otel,logs.otel.*` only when targeting 9.4+ wired streams exclusively
 - The `kql` field was used in earlier versions; `esql` is now preferred for semantic searchability
 - The `filter` DSL (`and`/`or`/`eq` combinators) from the API docs does **NOT** work
 - `evidence` and `feature` fields are optional metadata (they get stored but are not the detection mechanism)
@@ -512,7 +512,7 @@ attributes.error.type: "ThermalCalibrationException" AND attributes.sensor.type:
 
 ### Stream Name Discovery
 - `GET /api/streams` returns available streams
-- For OTLP logs, the stream name is `logs.otel`
+- For OTLP logs on Stack 9.2–9.3, the Kibana stream name is `logs` (this demo hardcodes that). On 9.4+, `logs.otel` is available as an alternative wired endpoint.
 - Stream must contain data for queries to match
 
 ### Verification

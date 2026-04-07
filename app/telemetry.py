@@ -116,7 +116,7 @@ class OTLPClient:
             "data_stream.type": "logs",
             "data_stream.dataset": "generic",
             "data_stream.namespace": "default",
-            "elasticsearch.index": "logs.otel",
+            "elasticsearch.index": "logs",
         }
         # Add process.runtime attributes so Elastic APM can identify the runtime
         _RUNTIME_ATTRS = {

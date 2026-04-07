@@ -698,30 +698,8 @@ echo ""
 # ── 7. Significant Events (Streams Queries) ─────────────────────────────────
 echo "--- Significant Events (Streams Queries) ---"
 
-# Discover stream name (same logic as setup-significant-events.sh)
-se_stream=""
-se_streams_out=$(kb_get "/api/streams" 2>/dev/null) || true
-se_streams_code=$(echo "$se_streams_out" | tail -1)
-se_streams_body=$(echo "$se_streams_out" | sed '$d')
-
-if [[ "$se_streams_code" -ge 200 && "$se_streams_code" -lt 300 ]] && [[ -n "$se_streams_body" ]]; then
-    se_stream=$(echo "$se_streams_body" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    streams = data if isinstance(data, list) else data.get('streams', data.get('results', data.get('data', [])))
-    for s in streams:
-        name = s.get('name', s) if isinstance(s, dict) else s
-        if name in ('logs.otel', 'logs'):
-            print(name); exit(0)
-except:
-    pass
-" 2>/dev/null || true)
-fi
-
-if [[ -z "$se_stream" ]]; then
-    se_stream="logs.otel"
-fi
+# Wired OTLP logs stream (Stack 9.2–9.3; use logs.otel only when targeting 9.4+ exclusively)
+se_stream="logs"
 
 se_response=$(kb_get "/api/streams/${se_stream}/queries")
 se_code=$(echo "$se_response" | tail -1)

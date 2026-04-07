@@ -6,7 +6,11 @@ import logging
 
 import httpx
 
-from elastic_config.deployer_base import _kibana_headers, ProgressCallback
+from elastic_config.deployer_base import (
+    ProgressCallback,
+    WIRED_LOGS_STREAM,
+    _kibana_headers,
+)
 
 logger = logging.getLogger("deployer")
 
@@ -21,13 +25,20 @@ class EventsMixin:
         # Clean existing queries (streams already enabled in _configure_platform_settings)
         self._cleanup_significant_events(client)
 
+        base = self.kibana_url.rstrip("/")
+        stream = WIRED_LOGS_STREAM
+        from_targets = f"{stream},{stream}.*"
+
         # Build bulk operations
         operations = []
         registry = self.scenario.channel_registry
         for ch_num, ch_data in sorted(registry.items()):
             num_str = f"{int(ch_num):02d}"
             error_type = ch_data["error_type"]
-            esql_query = f'FROM logs.otel,logs.otel.* METADATA _id, _source | WHERE body.text LIKE "*{error_type}*" AND severity_text == "ERROR"'
+            esql_query = (
+                f"FROM {from_targets} METADATA _id, _source | "
+                f'WHERE body.text LIKE "*{error_type}*" AND severity_text == "ERROR"'
+            )
             operations.append({
                 "index": {
                     "id": f"{self.ns}-se-ch{num_str}",
@@ -41,7 +52,7 @@ class EventsMixin:
 
         if operations:
             resp = client.post(
-                f"{self.kibana_url}/api/streams/logs.otel/queries/_bulk",
+                f"{base}/api/streams/{stream}/queries/_bulk",
                 headers=_kibana_headers(self.api_key),
                 json={"operations": operations},
             )
@@ -58,8 +69,10 @@ class EventsMixin:
     def _cleanup_significant_events(self, client: httpx.Client):
         """Delete stream queries for this namespace."""
         try:
+            stream = WIRED_LOGS_STREAM
+            base = self.kibana_url.rstrip("/")
             resp = client.get(
-                f"{self.kibana_url}/api/streams/logs.otel/queries",
+                f"{base}/api/streams/{stream}/queries",
                 headers=_kibana_headers(self.api_key),
             )
             if resp.status_code < 300:
@@ -69,7 +82,7 @@ class EventsMixin:
                     qid = q.get("id", "")
                     if qid.startswith(f"{self.ns}-se-"):
                         client.delete(
-                            f"{self.kibana_url}/api/streams/logs.otel/queries/{qid}",
+                            f"{base}/api/streams/{stream}/queries/{qid}",
                             headers=_kibana_headers(self.api_key),
                         )
         except Exception:

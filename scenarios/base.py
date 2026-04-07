@@ -327,7 +327,7 @@ class BaseScenario(ABC):
                 ),
                 "configuration": {
                     "query": (
-                        "FROM logs.otel,logs.otel.* "
+                        "FROM logs,logs.* "
                         "| WHERE @timestamp > NOW() - 15 MINUTES "
                         'AND body.text LIKE ?error_type AND severity_text == "ERROR" '
                         "| KEEP @timestamp, body.text, service.name, severity_text, event_name "
@@ -336,7 +336,7 @@ class BaseScenario(ABC):
                     "params": {
                         "error_type": {
                             "description": f"Wildcard pattern for the error type, e.g. *{example_error}*",
-                            "type": "string",
+                            "type": "text",
                             "optional": False,
                         }
                     },
@@ -353,7 +353,7 @@ class BaseScenario(ABC):
                 ),
                 "configuration": {
                     "query": (
-                        "FROM logs.otel,logs.otel.* "
+                        "FROM logs,logs.* "
                         "| WHERE @timestamp > NOW() - 15 MINUTES "
                         '| STATS error_count = COUNT(*) WHERE severity_text == "ERROR", '
                         'warn_count = COUNT(*) WHERE severity_text == "WARN", '
@@ -373,7 +373,7 @@ class BaseScenario(ABC):
                 ),
                 "configuration": {
                     "query": (
-                        "FROM logs.otel,logs.otel.* "
+                        "FROM logs,logs.* "
                         "| WHERE @timestamp > NOW() - 15 MINUTES "
                         "AND service.name == ?service_name "
                         'AND severity_text IN ("ERROR", "WARN") '
@@ -383,7 +383,7 @@ class BaseScenario(ABC):
                     "params": {
                         "service_name": {
                             "description": f"The service to investigate ({svc_names})",
-                            "type": "string",
+                            "type": "text",
                             "optional": False,
                         }
                     },
@@ -412,7 +412,7 @@ class BaseScenario(ABC):
                 ),
                 "configuration": {
                     "query": (
-                        "FROM logs.otel,logs.otel.* "
+                        "FROM logs,logs.* "
                         "| WHERE @timestamp > NOW() - 15 MINUTES "
                         'AND severity_text IN ("ERROR", "WARN") '
                         '| STATS error_count = COUNT(*) WHERE severity_text == "ERROR", '
@@ -432,7 +432,7 @@ class BaseScenario(ABC):
                 ),
                 "configuration": {
                     "query": (
-                        "FROM logs.otel,logs.otel.* "
+                        "FROM logs,logs.* "
                         "| WHERE @timestamp > NOW() - 15 MINUTES "
                         'AND severity_text IN ("ERROR", "WARN") '
                         "| KEEP @timestamp, body.text, service.name, severity_text "
@@ -452,7 +452,7 @@ class BaseScenario(ABC):
                 "description": assessment["description"],
                 "configuration": {
                     "query": (
-                        "FROM logs.otel,logs.otel.* "
+                        "FROM logs,logs.* "
                         "| WHERE @timestamp > NOW() - 15 MINUTES "
                         'AND severity_text IN ("ERROR", "WARN") '
                         '| STATS error_count = COUNT(*) WHERE severity_text == "ERROR", '

@@ -61,3 +61,7 @@ def _es_headers(api_key: str) -> dict[str, str]:
         "Content-Type": "application/json",
         "Authorization": f"ApiKey {api_key}",
     }
+
+
+# Kibana wired stream for OTLP logs (Stack 9.2–9.3; use ``logs.otel`` when targeting 9.4+ only)
+WIRED_LOGS_STREAM = "logs"

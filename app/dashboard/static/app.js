@@ -3,13 +3,18 @@
     'use strict';
 
     const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${location.host}/ws/dashboard`;
     let ws = null;
     let pollInterval = null;
 
     // ── Deployment isolation ────────────────────────────────
-    const deployId = window.DEPLOYMENT_ID || '';
+    let deployId = (window.DEPLOYMENT_ID || '').trim();
+    if (!deployId) {
+        try {
+            deployId = (new URLSearchParams(location.search).get('deployment_id') || '').trim();
+        } catch (e) { deployId = ''; }
+    }
     const qs = deployId ? '?deployment_id=' + encodeURIComponent(deployId) : '';
+    const wsUrl = `${wsProtocol}//${location.host}/ws/dashboard${qs}`;
 
     // ── localStorage session isolation (namespace-scoped) ────
     const ns = window.SCENARIO_NAMESPACE || 'demo';

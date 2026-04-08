@@ -30,6 +30,19 @@ SMTP_FROM = os.getenv("SMTP_FROM", "nova7-ops@mission-control.local")
 APP_PORT = int(os.getenv("APP_PORT", "80"))
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
 
+# ── Locked demo credentials (server-side only; selector hides connection form) ─
+# When DEMO_CREDENTIALS_LOCKED=1, /api/setup/launch and test-connection use ONLY
+# these env vars — the browser never receives the API key.
+CREDENTIALS_LOCKED = os.getenv("DEMO_CREDENTIALS_LOCKED", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+DEMO_KIBANA_URL = os.getenv("DEMO_KIBANA_URL", "").strip().rstrip("/")
+DEMO_ELASTIC_API_KEY = os.getenv("DEMO_ELASTIC_API_KEY", "").strip()
+DEMO_ELASTIC_URL = os.getenv("DEMO_ELASTIC_URL", "").strip().rstrip("/")
+DEMO_OTLP_URL = os.getenv("DEMO_OTLP_URL", "").strip().rstrip("/")
+
 # ── Active Scenario ───────────────────────────────────────────────────────
 ACTIVE_SCENARIO = os.getenv("ACTIVE_SCENARIO", "space")
 

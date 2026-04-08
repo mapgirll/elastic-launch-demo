@@ -179,7 +179,7 @@ def run(client: OTLPClient, stop_event: threading.Event, scenario_data: dict | N
     # Rebuild namespace-dependent data from scenario_data to avoid import-time freezing
     if scenario_data:
         ns = scenario_data["namespace"]
-        scope_name = f"{ns}-vpc-flow-generator"
+        scope_name = scenario_data.get("otlp_scope_name") or f"{ns}-vpc-flow-generator"
         gcp_vpc_names = [f"{ns}-vpc-prod", f"{ns}-vpc-staging", f"{ns}-vpc-data"]
         # Rebuild GCP resource with dynamic namespace
         gcp_attrs = {

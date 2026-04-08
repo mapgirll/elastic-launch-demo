@@ -6,6 +6,7 @@ events, dashboard, alerting) to an Elastic Cloud environment.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -19,6 +20,48 @@ import httpx
 from scenarios.base import BaseScenario
 
 logger = logging.getLogger("deployer")
+
+
+def _use_legacy_workflow_alert_action() -> bool:
+    """If true, use only the legacy ``actions`` shape (no ``systemActions``).
+
+    Otherwise the deployer tries ``systemActions`` first (correct rule UI on stacks
+    that support it). On 400 indicating an unknown ``systemActions`` key, it
+    retries once with legacy ``actions``, then caches that choice for the rest of
+    the same deployment.
+
+    Set ``ELASTIC_ALERT_LEGACY_WORKFLOW_ACTION=1`` to skip ``systemActions`` and
+    the probe entirely.
+    """
+    return os.getenv("ELASTIC_ALERT_LEGACY_WORKFLOW_ACTION", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _legacy_workflow_alert_actions(workflow_params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Actions array shape for ``system-connector-.workflows`` (pre-systemActions API)."""
+    return [
+        {
+            "group": "query matched",
+            "id": "system-connector-.workflows",
+            "frequency": {
+                "summary": False,
+                "notify_when": "onActiveAlert",
+                "throttle": None,
+            },
+            "params": workflow_params,
+        }
+    ]
+
+
+def _alert_rule_post_should_retry_legacy(resp: httpx.Response, used_system_actions: bool) -> bool:
+    if resp.status_code != 400 or not used_system_actions:
+        return False
+    err = (resp.text or "").lower()
+    return "systemactions" in err or "definition for this key is missing" in err
+
 
 # ── Progress reporting ──────────────────────────────────────────────────────
 
@@ -77,6 +120,32 @@ def _es_headers(api_key: str) -> dict[str, str]:
     }
 
 
+def _flip_esql_tool_param_types(tool_def: dict[str, Any]) -> dict[str, Any] | None:
+    """Kibana 9.3 expects text/keyword; 9.4+ simplified to string (see kibana#249855)."""
+    if tool_def.get("type") != "esql":
+        return None
+    cfg = tool_def.get("configuration")
+    if not isinstance(cfg, dict):
+        return None
+    params = cfg.get("params")
+    if not isinstance(params, dict) or not params:
+        return None
+    out = copy.deepcopy(tool_def)
+    p2 = out["configuration"]["params"]
+    changed = False
+    for spec in p2.values():
+        if not isinstance(spec, dict):
+            continue
+        t = spec.get("type")
+        if t in ("text", "keyword"):
+            spec["type"] = "string"
+            changed = True
+        elif t == "string":
+            spec["type"] = "text"
+            changed = True
+    return out if changed else None
+
+
 # ── Main deployer class ────────────────────────────────────────────────────
 
 class ScenarioDeployer:
@@ -97,26 +166,25 @@ class ScenarioDeployer:
         self.progress = DeployProgress()
         self._workflow_ids: dict[str, str] = {}  # name fragment -> workflow ID
         self._created_tool_ids: list[str] = []   # tools that were actually created
-        self._wired_logs_stream: str | None = None  # Kibana stream name for /api/streams/{name}/queries/*
+        # None = unknown; True = stack rejected systemActions (use legacy actions); False = systemActions OK
+        self._alert_use_legacy_workflow_payload: bool | None = None
 
     # ── Public API ─────────────────────────────────────────────────────
 
     def deploy_all(self, callback: ProgressCallback | None = None) -> DeployProgress:
         """Run the full deployment pipeline.  Returns progress summary."""
-        self._wired_logs_stream = None
         self.progress = DeployProgress(steps=[
             DeployStep("Connectivity check"),           # 0
             DeployStep("Derive OTLP endpoint"),         # 1
-            DeployStep("Clean up old artifacts"),       # 2
-            DeployStep("Configure platform settings"),  # 3
-            DeployStep("Deploy workflows", items_total=3),  # 4
-            DeployStep("Index knowledge base", items_total=20),  # 5
-            DeployStep("Deploy AI agent tools", items_total=7),  # 6
-            DeployStep("Create AI agent"),              # 7
-            DeployStep("Create significant events", items_total=20),  # 8
-            DeployStep("Create data views"),            # 9
-            DeployStep("Import executive dashboard"),   # 10
-            DeployStep("Create alert rules", items_total=20),  # 11
+            DeployStep("Configure platform settings"),  # 2
+            DeployStep("Deploy workflows", items_total=3),  # 3
+            DeployStep("Index knowledge base", items_total=20),  # 4
+            DeployStep("Deploy AI agent tools", items_total=7),  # 5
+            DeployStep("Create AI agent"),              # 6
+            DeployStep("Create significant events", items_total=20),  # 7
+            DeployStep("Create data views"),            # 8
+            DeployStep("Import executive dashboard"),   # 9
+            DeployStep("Create alert rules", items_total=20),  # 10
         ])
         _notify = callback or (lambda p: None)
         _notify(self.progress)
@@ -125,13 +193,12 @@ class ScenarioDeployer:
             with httpx.Client(timeout=60.0, verify=True) as client:
                 self._check_connectivity(client, _notify)
                 self._derive_otlp_step(client, _notify)
-                self._cleanup_all_scenarios_step(client, _notify)
                 self._configure_platform_settings(client, _notify)
                 self._deploy_workflows(client, _notify)
                 self._deploy_knowledge_base(client, _notify)
                 self._deploy_tools(client, _notify)
                 self._deploy_agent(client, _notify)
-                self._deploy_significant_events(client, _notify)
+                self._deploy_significant_events(client, _notify, step_index=7)
                 self._deploy_data_views(client, _notify)
                 self._deploy_dashboard(client, _notify)
                 self._deploy_alerting(client, _notify)
@@ -139,6 +206,25 @@ class ScenarioDeployer:
             self.progress.error = str(exc)
             logger.exception("Deployment failed")
 
+        self.progress.finished = True
+        _notify(self.progress)
+        return self.progress
+
+    def deploy_significant_events_only(
+        self, callback: ProgressCallback | None = None
+    ) -> DeployProgress:
+        """Create significant-event stream queries only (e.g. from a Python REPL)."""
+        self.progress = DeployProgress(
+            steps=[DeployStep("Create significant events", items_total=20)],
+        )
+        _notify = callback or (lambda p: None)
+        _notify(self.progress)
+        try:
+            with httpx.Client(timeout=60.0, verify=True) as client:
+                self._deploy_significant_events(client, _notify, step_index=0)
+        except Exception as exc:
+            self.progress.error = str(exc)
+            logger.exception("Significant events deployment failed")
         self.progress.finished = True
         _notify(self.progress)
         return self.progress
@@ -455,18 +541,10 @@ class ScenarioDeployer:
 
     # ── Wired streams (Kibana 9.x) ───────────────────────────────────
 
-    def _wired_logs_stream_name(self, client: httpx.Client) -> str:
-        """Resolve stream name for significant-event queries (GET/POST .../queries).
-
-        Agent Builder docs use ``/api/streams/{name}/queries``; the wired OTLP stream
-        may be ``logs``, ``logs.otel``, or ``logs.ecs`` depending on stack version.
-        """
-        if self._wired_logs_stream is not None:
-            return self._wired_logs_stream
-
+    def _logs_stream_candidates(self, client: httpx.Client) -> list[str]:
+        """Candidate stream names for wired OTLP logs (queries / significant events)."""
+        found: list[str] = []
         hdr = _kibana_headers(self.api_key)
-        candidates: list[str] = []
-
         try:
             resp = client.get(f"{self.kibana_url}/api/streams", headers=hdr)
             if resp.status_code < 300:
@@ -476,14 +554,14 @@ class ScenarioDeployer:
                 )
                 for item in raw:
                     name = item.get("name", item) if isinstance(item, dict) else item
-                    if isinstance(name, str) and name.startswith("logs") and name not in candidates:
-                        candidates.append(name)
+                    if isinstance(name, str) and name.startswith("logs") and name not in found:
+                        found.append(name)
         except Exception:
             pass
 
         for fallback in ("logs", "logs.otel", "logs.ecs"):
-            if fallback not in candidates:
-                candidates.append(fallback)
+            if fallback not in found:
+                found.append(fallback)
 
         def _stream_probe_rank(n: str) -> tuple[int, str]:
             return (
@@ -491,110 +569,144 @@ class ScenarioDeployer:
                 n,
             )
 
-        candidates = sorted(set(candidates), key=_stream_probe_rank)
+        return sorted(set(found), key=_stream_probe_rank)
 
-        for name in candidates:
-            enc = quote(name, safe="")
-            try:
-                r = client.get(
-                    f"{self.kibana_url}/api/streams/{enc}/queries",
-                    headers=hdr,
-                )
-                if r.status_code < 300:
-                    self._wired_logs_stream = name
-                    logger.info("Streams queries API: using wired stream %r", name)
-                    return name
-            except Exception:
+    def _deploy_stream_queries_put_each(
+        self,
+        client: httpx.Client,
+        stream: str,
+        operations: list[dict[str, Any]],
+    ) -> tuple[int, str]:
+        """Fallback: PUT /api/streams/{stream}/queries/{id} for each operation."""
+        hdr = _kibana_headers(self.api_key)
+        enc = quote(stream, safe="")
+        ok = 0
+        last_err = ""
+        for op in operations:
+            inner = op.get("index") or op.get("create") or op
+            if not isinstance(inner, dict):
                 continue
-
-        self._wired_logs_stream = "logs"
-        logger.warning(
-            "Could not probe GET /api/streams/*/queries; defaulting stream name to 'logs'"
-        )
-        return self._wired_logs_stream
+            qid = inner.get("id", "")
+            if not qid:
+                continue
+            body = {
+                "title": inner.get("title", ""),
+                "kql": inner.get("kql", {}),
+            }
+            qe = quote(qid, safe="")
+            r = client.put(
+                f"{self.kibana_url}/api/streams/{enc}/queries/{qe}",
+                headers=hdr,
+                json=body,
+            )
+            if r.status_code < 300:
+                ok += 1
+            else:
+                last_err = r.text[:300]
+        return ok, last_err
 
     # ── Platform Settings ──────────────────────────────────────────────
 
     def _configure_platform_settings(self, client: httpx.Client, notify: ProgressCallback):
         """Enable wired streams, significant events, and agent builder."""
-        step = self._step(3)
+        step = self._step(2)
         step.status = "running"
         notify(self.progress)
 
-        configured = []
-        errors = []
+        # When enabled (truthy branch below), this step calls Kibana once per deploy:
+        #   1. POST /api/streams/_enable — wired streams (idempotent).
+        #   2. POST /internal/kibana/settings — observability:streamsEnableSignificantEvents.
+        #   3. POST /internal/kibana/settings — aiAssistant:preferredChatExperience = agent.
+        #   4. POST /internal/kibana/settings — workflows:ui:enabled.
+        # This does NOT call POST /api/streams/_disable; it does not delete streams.
+        # Disable this block (if False) to avoid changing cluster-wide Kibana settings or if
+        # wired streams / a conflicting `logs` index caused Kibana issues — then enable
+        # wired streams and significant events manually in Kibana if you still need them.
+        # Significant-event stream queries (_deploy_significant_events) expect wired streams
+        # + significant events to already be on if that step is to succeed.
+        # To re-enable: set `if True:` or remove the if/else wrapper and un-indent the body.
+        if False:
+            configured = []
+            errors = []
 
-        # 1. Enable wired streams
-        try:
-            resp = client.post(
-                f"{self.kibana_url}/api/streams/_enable",
-                headers=_kibana_headers(self.api_key),
-                json={},
-            )
-            if resp.status_code < 300:
-                configured.append("wired streams")
+            # 1. Enable wired streams
+            try:
+                resp = client.post(
+                    f"{self.kibana_url}/api/streams/_enable",
+                    headers=_kibana_headers(self.api_key),
+                    json={},
+                )
+                if resp.status_code < 300:
+                    configured.append("wired streams")
+                else:
+                    errors.append(f"wired streams (HTTP {resp.status_code})")
+            except Exception as exc:
+                errors.append(f"wired streams ({exc})")
+
+            # 2. Enable significant events
+            try:
+                resp = client.post(
+                    f"{self.kibana_url}/internal/kibana/settings",
+                    headers=_kibana_headers(self.api_key),
+                    json={"changes": {"observability:streamsEnableSignificantEvents": True}},
+                )
+                if resp.status_code < 300:
+                    configured.append("significant events")
+                else:
+                    errors.append(f"significant events (HTTP {resp.status_code})")
+            except Exception as exc:
+                errors.append(f"significant events ({exc})")
+
+            # 3. Enable agent builder as preferred chat experience
+            try:
+                resp = client.post(
+                    f"{self.kibana_url}/internal/kibana/settings",
+                    headers=_kibana_headers(self.api_key),
+                    json={"changes": {"aiAssistant:preferredChatExperience": "agent"}},
+                )
+                if resp.status_code < 300:
+                    configured.append("agent builder")
+                else:
+                    errors.append(f"agent builder (HTTP {resp.status_code})")
+            except Exception as exc:
+                errors.append(f"agent builder ({exc})")
+
+            # 4. Enable workflows UI
+            try:
+                resp = client.post(
+                    f"{self.kibana_url}/internal/kibana/settings",
+                    headers=_kibana_headers(self.api_key),
+                    json={"changes": {"workflows:ui:enabled": True}},
+                )
+                if resp.status_code < 300:
+                    configured.append("workflows UI")
+                else:
+                    errors.append(f"workflows UI (HTTP {resp.status_code})")
+            except Exception as exc:
+                errors.append(f"workflows UI ({exc})")
+
+            if configured:
+                step.status = "ok"
+                step.detail = f"Enabled: {', '.join(configured)}"
+                if errors:
+                    step.detail += f"; failed: {', '.join(errors)}"
             else:
-                errors.append(f"wired streams (HTTP {resp.status_code})")
-        except Exception as exc:
-            errors.append(f"wired streams ({exc})")
+                step.status = "failed"
+                step.detail = f"Failed: {', '.join(errors)}"
 
-        # 2. Enable significant events
-        try:
-            resp = client.post(
-                f"{self.kibana_url}/internal/kibana/settings",
-                headers=_kibana_headers(self.api_key),
-                json={"changes": {"observability:streamsEnableSignificantEvents": True}},
-            )
-            if resp.status_code < 300:
-                configured.append("significant events")
-            else:
-                errors.append(f"significant events (HTTP {resp.status_code})")
-        except Exception as exc:
-            errors.append(f"significant events ({exc})")
-
-        # 3. Enable agent builder as preferred chat experience
-        try:
-            resp = client.post(
-                f"{self.kibana_url}/internal/kibana/settings",
-                headers=_kibana_headers(self.api_key),
-                json={"changes": {"aiAssistant:preferredChatExperience": "agent"}},
-            )
-            if resp.status_code < 300:
-                configured.append("agent builder")
-            else:
-                errors.append(f"agent builder (HTTP {resp.status_code})")
-        except Exception as exc:
-            errors.append(f"agent builder ({exc})")
-
-        # 4. Enable workflows UI
-        try:
-            resp = client.post(
-                f"{self.kibana_url}/internal/kibana/settings",
-                headers=_kibana_headers(self.api_key),
-                json={"changes": {"workflows:ui:enabled": True}},
-            )
-            if resp.status_code < 300:
-                configured.append("workflows UI")
-            else:
-                errors.append(f"workflows UI (HTTP {resp.status_code})")
-        except Exception as exc:
-            errors.append(f"workflows UI ({exc})")
-
-        if configured:
-            step.status = "ok"
-            step.detail = f"Enabled: {', '.join(configured)}"
-            if errors:
-                step.detail += f"; failed: {', '.join(errors)}"
+            notify(self.progress)
         else:
-            step.status = "failed"
-            step.detail = f"Failed: {', '.join(errors)}"
-
-        notify(self.progress)
+            step.status = "skipped"
+            step.detail = (
+                "Skipped: platform settings (wired streams, significant events, "
+                "agent builder, workflows UI) — block disabled in deployer.py"
+            )
+            notify(self.progress)
 
     # ── Workflows ──────────────────────────────────────────────────────
 
     def _deploy_workflows(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(4)
+        step = self._step(3)
         step.status = "running"
         notify(self.progress)
 
@@ -903,7 +1015,7 @@ steps:
     # ── Tools ──────────────────────────────────────────────────────────
 
     def _deploy_tools(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(6)
+        step = self._step(5)
         step.status = "running"
         notify(self.progress)
 
@@ -914,7 +1026,7 @@ steps:
         for name_frag, wf_id in self._workflow_ids.items():
             if "remediation" in name_frag:
                 tools.append({
-                    "id": "remediation_action",
+                    "id": self.scenario.prefixed_tool_id("remediation_action"),
                     "type": "workflow",
                     "description": (
                         "Execute remediation actions for anomalies. Triggers the "
@@ -924,7 +1036,7 @@ steps:
                 })
             elif "escalation" in name_frag:
                 tools.append({
-                    "id": "escalation_action",
+                    "id": self.scenario.prefixed_tool_id("escalation_action"),
                     "type": "workflow",
                     "description": (
                         "Escalate critical anomalies and manage operational hold decisions."
@@ -946,6 +1058,20 @@ steps:
                 headers=_kibana_headers(self.api_key),
                 json=tool_def,
             )
+            err_lower = (resp.text or "").lower()
+            if (
+                resp.status_code >= 300
+                and tool_def.get("type") == "esql"
+                and "params." in err_lower
+                and "type" in err_lower
+            ):
+                alt = _flip_esql_tool_param_types(tool_def)
+                if alt is not None:
+                    resp = client.post(
+                        f"{self.kibana_url}/api/agent_builder/tools",
+                        headers=_kibana_headers(self.api_key),
+                        json=alt,
+                    )
             if resp.status_code < 300:
                 step.items_done += 1
                 step.detail = f"Created: {tool_id}"
@@ -961,7 +1087,7 @@ steps:
     # ── Agent ──────────────────────────────────────────────────────────
 
     def _deploy_agent(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(7)
+        step = self._step(6)
         step.status = "running"
         notify(self.progress)
 
@@ -1030,11 +1156,20 @@ steps:
             f"an expert AI agent embedded in the Elastic observability platform."
         )
 
-        # Scenario-specific assessment tool name
-        assessment_tool = agent_cfg.get(
+        # Scenario-specific assessment tool (prefixed id matches Agent Builder)
+        _assess_bare = agent_cfg.get(
             "assessment_tool_name",
             scenario.assessment_tool_config.get("id", "operational_assessment"),
         )
+        assessment_tool = scenario.prefixed_tool_id(_assess_bare)
+        pt = scenario.prefixed_tool_id
+        t_search_err = pt("search_error_logs")
+        t_search_svc = pt("search_service_logs")
+        t_browse = pt("browse_recent_errors")
+        t_subsys = pt("search_subsystem_health")
+        t_known = pt("search_known_anomalies")
+        t_trace = pt("trace_anomaly_propagation")
+        t_remediate = pt("remediation_action")
 
         return f"""{identity}
 
@@ -1055,11 +1190,11 @@ steps:
 - Use LIKE or KQL() for text matching — NEVER use MATCH()
 
 ## Tool Selection Guide
-1. **Known error type** → `search_error_logs` — parameterized, correct fields
-2. **Specific service** → `search_service_logs` — parameterized, correct fields
-3. **General awareness** → `browse_recent_errors` or `search_subsystem_health`
-4. **Historical patterns** → `search_known_anomalies` — knowledge base lookup
-5. **Cascade analysis** → `trace_anomaly_propagation` — cross-service correlation
+1. **Known error type** → `{t_search_err}` — parameterized, correct fields
+2. **Specific service** → `{t_search_svc}` — parameterized, correct fields
+3. **General awareness** → `{t_browse}` or `{t_subsys}`
+4. **Historical patterns** → `{t_known}` — knowledge base lookup
+5. **Cascade analysis** → `{t_trace}` — cross-service correlation
 6. **Operational readiness** → `{assessment_tool}` — overall system health evaluation
 Do NOT write custom ES|QL queries. Use the parameterized tools.
 
@@ -1071,7 +1206,7 @@ Do NOT write custom ES|QL queries. Use the parameterized tools.
 5. **Subsystem Impact**: Evaluate if fault is isolated or propagating
 6. **Known Pattern Matching**: Check knowledge base for similar anomalies
 7. **Severity Classification**: ADVISORY, CAUTION, WARNING, or CRITICAL
-8. **Remediation**: When the user asks you to remediate, look up the recommended remediation_action from the knowledge base entry for that channel. Use the remediation_action tool with the appropriate action_type and the affected channel number. Once the workflow completes, report the remediation as successful. Do NOT execute remediation unless the user explicitly asks you to.
+8. **Remediation**: When the user asks you to remediate, look up the recommended action_type from the knowledge base entry for that channel. Use the `{t_remediate}` tool with the appropriate action_type and the affected channel number. Once the workflow completes, report the remediation as successful. Do NOT execute remediation unless the user explicitly asks you to.
 
 ## Available Services
 {svc_names}
@@ -1088,7 +1223,7 @@ Do NOT write custom ES|QL queries. Use the parameterized tools.
     # ── Knowledge Base ─────────────────────────────────────────────────
 
     def _deploy_knowledge_base(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(5)
+        step = self._step(4)
         step.status = "running"
         notify(self.progress)
 
@@ -1177,6 +1312,9 @@ Do NOT write custom ES|QL queries. Use the parameterized tools.
 ## Vendor-Specific Investigation
 {investigation_notes}
 """
+        pt = self.scenario.prefixed_tool_id
+        t_search_err = pt("search_error_logs")
+        t_remediate = pt("remediation_action")
 
         return f"""# Channel {ch_num}: {name}
 
@@ -1190,7 +1328,7 @@ Do NOT write custom ES|QL queries. Use the parameterized tools.
 {description}
 
 ## Investigation Procedure
-1. Search for `{error_type}` in recent ERROR logs using `search_error_logs` — this identifier appears in the log body (body.text)
+1. Search for `{error_type}` in recent ERROR logs using `{t_search_err}` — this identifier appears in the log body (body.text)
 2. Check health of affected services: {affected}
 3. Trace anomaly propagation to cascade services: {cascade}
 4. Check for correlated errors in the same time window
@@ -1201,20 +1339,30 @@ Do NOT write custom ES|QL queries. Use the parameterized tools.
 - Verify if errors correlate with infrastructure events
 
 ## Remediation
-When the user asks you to fix or remediate this issue, use remediation_action tool with action_type: {remediation_action}, channel: {ch_num}, and a justification. Once executed, report remediation as successful.
+When the user asks you to fix or remediate this issue, use `{t_remediate}` with action_type: {remediation_action}, channel: {ch_num}, and a justification. Once executed, report remediation as successful.
 """
 
     # ── Significant Events ─────────────────────────────────────────────
 
-    def _deploy_significant_events(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(8)
+    def _deploy_significant_events(
+        self,
+        client: httpx.Client,
+        notify: ProgressCallback,
+        *,
+        step_index: int = 7,
+    ):
+        """Create significant-event stream queries on wired logs streams.
+
+        ``step_index`` is 7 inside ``deploy_all``; use 0 with a one-step
+        :class:`DeployProgress` from :meth:`deploy_significant_events_only`.
+        """
+        step = self._step(step_index)
         step.status = "running"
         notify(self.progress)
 
-        # Clean existing queries (streams already enabled in _configure_platform_settings)
+        # Clean existing queries for this namespace (streams enabled in _configure_platform_settings)
         self._cleanup_significant_events(client)
 
-        # Build bulk operations
         operations = []
         registry = self.scenario.channel_registry
         for ch_num, ch_data in sorted(registry.items()):
@@ -1232,24 +1380,65 @@ When the user asks you to fix or remediate this issue, use remediation_action to
         step.items_total = len(operations)
 
         if operations:
-            stream = self._wired_logs_stream_name(client)
-            enc = quote(stream, safe="")
-            resp = client.post(
-                f"{self.kibana_url}/api/streams/{enc}/queries/_bulk",
-                headers=_kibana_headers(self.api_key),
-                json={"operations": operations},
-            )
-            if resp.status_code < 300:
-                step.items_done = len(operations)
-                step.detail = f"Created {len(operations)} stream queries on {stream!r}"
+            hdr = _kibana_headers(self.api_key)
+            candidates = self._logs_stream_candidates(client)
+            created_on = ""
+            for stream in candidates:
+                enc = quote(stream, safe="")
+                resp = client.post(
+                    f"{self.kibana_url}/api/streams/{enc}/queries/_bulk",
+                    headers=hdr,
+                    json={"operations": operations},
+                )
+                if resp.status_code < 300:
+                    step.items_done = len(operations)
+                    created_on = stream
+                    logger.info(
+                        "Significant events: bulk OK on stream %r (%d queries)",
+                        stream,
+                        len(operations),
+                    )
+                    break
+                logger.info(
+                    "Significant events bulk stream=%r HTTP %s: %s",
+                    stream,
+                    resp.status_code,
+                    resp.text[:200],
+                )
+
+            if step.items_done == 0:
+                for stream in candidates:
+                    n_ok, err = self._deploy_stream_queries_put_each(
+                        client, stream, operations
+                    )
+                    if n_ok == len(operations):
+                        step.items_done = n_ok
+                        created_on = stream
+                        logger.info(
+                            "Significant events: PUT fallback OK on stream %r",
+                            stream,
+                        )
+                        break
+                    logger.info(
+                        "Significant events PUT fallback stream=%r ok=%s/%s: %s",
+                        stream,
+                        n_ok,
+                        len(operations),
+                        err,
+                    )
+
+            if step.items_done > 0:
+                step.detail = (
+                    f"Created {step.items_done} stream queries on {created_on!r}"
+                )
             else:
                 step.detail = (
-                    f"Bulk create failed on stream {stream!r} (HTTP {resp.status_code})"
+                    f"All streams failed ({', '.join(candidates)}); "
+                    "check manage_stream privilege and wired streams"
                 )
                 logger.warning(
-                    "Significant events bulk failed stream=%r: %s",
-                    stream,
-                    resp.text[:500],
+                    "Significant events: no stream accepted bulk or PUT; tried %s",
+                    candidates,
                 )
 
         step.status = "ok" if step.items_done > 0 else "failed"
@@ -1258,25 +1447,31 @@ When the user asks you to fix or remediate this issue, use remediation_action to
     # ── Data Views ─────────────────────────────────────────────────────
 
     def _deploy_data_views(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(9)
+        step = self._step(8)
         step.status = "running"
         notify(self.progress)
 
+        # Unique saved-object ids per scenario; titles stay standard index patterns.
+        ns_dv = self.ns.replace(".", "-")
+        dv_logs_star = f"{ns_dv}-dv-logs-star"
+        dv_logs_otel = f"{ns_dv}-dv-logs-otel"
+        dv_traces = f"{ns_dv}-dv-traces"
+        dv_metrics = f"{ns_dv}-dv-metrics"
+        dv_metrics_host = f"{ns_dv}-dv-metrics-host"
+
         views = [
-            # Custom view for exec dashboard panels (broad match, no hyphen)
             {
                 "data_view": {
-                    "id": "logs*",
+                    "id": dv_logs_star,
                     "title": "logs*",
                     "name": f"{self.scenario.scenario_name} Logs",
                     "timeFieldName": "@timestamp",
                 },
                 "override": True,
             },
-            # OTel-standard views — required by shipped [OTel] dashboards
             {
                 "data_view": {
-                    "id": "logs-*",
+                    "id": dv_logs_otel,
                     "title": "logs-*",
                     "name": "logs-*",
                     "timeFieldName": "@timestamp",
@@ -1285,7 +1480,7 @@ When the user asks you to fix or remediate this issue, use remediation_action to
             },
             {
                 "data_view": {
-                    "id": "traces-*",
+                    "id": dv_traces,
                     "title": "traces-*",
                     "name": f"{self.scenario.scenario_name} Traces",
                     "timeFieldName": "@timestamp",
@@ -1294,17 +1489,16 @@ When the user asks you to fix or remediate this issue, use remediation_action to
             },
             {
                 "data_view": {
-                    "id": "metrics-*",
+                    "id": dv_metrics,
                     "title": "metrics-*",
                     "name": f"{self.scenario.scenario_name} Metrics",
                     "timeFieldName": "@timestamp",
                 },
                 "override": True,
             },
-            # Required by [OTel] Host Details dashboards
             {
                 "data_view": {
-                    "id": "metrics-hostmetricsreceiver.otel-*",
+                    "id": dv_metrics_host,
                     "title": "metrics-hostmetricsreceiver.otel-*",
                     "name": "metrics-hostmetricsreceiver.otel-*",
                     "timeFieldName": "@timestamp",
@@ -1330,7 +1524,7 @@ When the user asks you to fix or remediate this issue, use remediation_action to
     # ── Dashboard ──────────────────────────────────────────────────────
 
     def _deploy_dashboard(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(10)
+        step = self._step(9)
         step.status = "running"
         notify(self.progress)
 
@@ -1369,7 +1563,7 @@ When the user asks you to fix or remediate this issue, use remediation_action to
     # ── Alerting ───────────────────────────────────────────────────────
 
     def _deploy_alerting(self, client: httpx.Client, notify: ProgressCallback):
-        step = self._step(11)
+        step = self._step(10)
         step.status = "running"
         notify(self.progress)
 
@@ -1410,6 +1604,7 @@ When the user asks you to fix or remediate this issue, use remediation_action to
         # Create 20 alert rules
         registry = self.scenario.channel_registry
         step.items_total = len(registry)
+        env_legacy = _use_legacy_workflow_alert_action()
 
         for ch_num, ch_data in sorted(registry.items()):
             num_str = f"{int(ch_num):02d}"
@@ -1440,7 +1635,23 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                 }
             })
 
-            rule = {
+            workflow_params = {
+                "subAction": "run",
+                "subActionParams": {
+                    "workflowId": notification_wf_id,
+                    "inputs": {
+                        "channel": ch_int,
+                        "error_type": error_type,
+                        "subsystem": subsystem,
+                        "severity": severity,
+                    },
+                },
+            }
+
+            # Prefer systemActions on stacks that support it (rule UI treats it as a
+            # system action, not a connector — avoids ".workflows is not registered").
+            # Older create-rule APIs reject systemActions; we retry once, then cache.
+            rule: dict[str, Any] = {
                 "name": rule_name,
                 "rule_type_id": ".es-query",
                 "consumer": "alerts",
@@ -1457,36 +1668,44 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                     "timeWindowSize": 1,
                     "timeWindowUnit": "m",
                 },
-                "actions": [{
-                    "group": "query matched",
-                    "id": "system-connector-.workflows",
-                    "frequency": {
-                        "summary": False,
-                        "notify_when": "onActiveAlert",
-                        "throttle": None,
-                    },
-                    "params": {
-                        "subAction": "run",
-                        "subActionParams": {
-                            "workflowId": notification_wf_id,
-                            "inputs": {
-                                "channel": ch_int,
-                                "error_type": error_type,
-                                "subsystem": subsystem,
-                                "severity": severity,
-                            },
-                        },
-                    },
-                }],
             }
-
-            resp = client.post(
-                f"{self.kibana_url}/api/alerting/rule",
-                headers=_kibana_headers(self.api_key),
-                json=rule,
+            legacy_actions = _legacy_workflow_alert_actions(workflow_params)
+            use_legacy = (
+                env_legacy or self._alert_use_legacy_workflow_payload is True
             )
+            used_system_actions = False
+            if use_legacy:
+                rule["actions"] = legacy_actions
+            else:
+                rule["actions"] = []
+                rule["systemActions"] = [
+                    {"id": "system-connector-.workflows", "params": workflow_params}
+                ]
+                used_system_actions = True
+
+            url = f"{self.kibana_url}/api/alerting/rule"
+            hdr = _kibana_headers(self.api_key)
+            retried_legacy = False
+            resp = client.post(url, headers=hdr, json=rule)
+            if _alert_rule_post_should_retry_legacy(resp, used_system_actions):
+                if self._alert_use_legacy_workflow_payload is not True:
+                    logger.info(
+                        "Alert rule API rejected systemActions; retrying %s with legacy "
+                        "actions (remaining rules will use legacy shape)",
+                        rule_name,
+                    )
+                rule_retry = {k: v for k, v in rule.items() if k != "systemActions"}
+                rule_retry["actions"] = legacy_actions
+                resp = client.post(url, headers=hdr, json=rule_retry)
+                retried_legacy = True
+
             if resp.status_code < 300:
                 step.items_done += 1
+                if not env_legacy and self._alert_use_legacy_workflow_payload is None:
+                    if retried_legacy:
+                        self._alert_use_legacy_workflow_payload = True
+                    elif used_system_actions:
+                        self._alert_use_legacy_workflow_payload = False
             else:
                 logger.warning("Alert rule %s failed: %s", rule_name, resp.text[:200])
             notify(self.progress)
@@ -1497,28 +1716,13 @@ When the user asks you to fix or remediate this issue, use remediation_action to
 
     # ── Cross-scenario cleanup ────────────────────────────────────────
 
-    def _cleanup_all_scenarios_step(self, client: httpx.Client, notify: ProgressCallback):
-        """Deploy step: clean up artifacts from ALL known scenarios."""
-        step = self._step(2)
-        step.status = "running"
-        notify(self.progress)
-
-        try:
-            deleted = self._cleanup_all_scenarios(client)
-            step.status = "ok"
-            step.detail = f"Cleaned {deleted} artifacts"
-        except Exception as exc:
-            step.status = "ok"  # non-fatal — continue deploying
-            step.detail = f"Partial cleanup: {exc}"
-            logger.warning("Cleanup error (non-fatal): %s", exc)
-        notify(self.progress)
-
     def _cleanup_all_scenarios(self, client: httpx.Client) -> int:
         """Delete artifacts for ALL known scenarios (not just the current one)."""
         from scenarios import get_scenario, list_scenarios
 
         all_scenarios = list_scenarios()
         deleted = 0
+        cleaned: list[str] = []
 
         # Collect all namespaces, scenario names, and agent IDs
         all_namespaces = []
@@ -1550,23 +1754,30 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                     for rule in rules:
                         rule_id = rule.get("id", "")
                         if rule_id:
-                            client.delete(
+                            dr = client.delete(
                                 f"{self.kibana_url}/api/alerting/rule/{rule_id}",
                                 headers=_kibana_headers(self.api_key),
                             )
-                            deleted += 1
+                            if dr.status_code < 300:
+                                deleted += 1
+                                rname = rule.get("name", rule_id)
+                                cleaned.append(
+                                    f"alert rule {rname!r} ({rule_id})"
+                                )
             except Exception:
                 pass
 
         # Delete stream queries with ANY known namespace prefix
         try:
-            stream = self._wired_logs_stream_name(client)
-            enc = quote(stream, safe="")
-            resp = client.get(
-                f"{self.kibana_url}/api/streams/{enc}/queries",
-                headers=_kibana_headers(self.api_key),
-            )
-            if resp.status_code < 300:
+            hdr = _kibana_headers(self.api_key)
+            for stream in self._logs_stream_candidates(client):
+                enc = quote(stream, safe="")
+                resp = client.get(
+                    f"{self.kibana_url}/api/streams/{enc}/queries",
+                    headers=hdr,
+                )
+                if resp.status_code >= 300:
+                    continue
                 data = resp.json()
                 queries = data if isinstance(data, list) else data.get("queries", [])
                 for q in queries:
@@ -1574,11 +1785,15 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                     for ns in all_namespaces:
                         if qid.startswith(f"{ns}-se-"):
                             qe = quote(qid, safe="")
-                            client.delete(
+                            dr = client.delete(
                                 f"{self.kibana_url}/api/streams/{enc}/queries/{qe}",
-                                headers=_kibana_headers(self.api_key),
+                                headers=hdr,
                             )
-                            deleted += 1
+                            if dr.status_code < 300:
+                                deleted += 1
+                                cleaned.append(
+                                    f"stream query {qid!r} on stream {stream!r}"
+                                )
                             break
         except Exception:
             pass
@@ -1599,11 +1814,15 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                         if sn in wf_name:
                             wf_id = item.get("id", "")
                             if wf_id:
-                                client.delete(
+                                dr = client.delete(
                                     f"{self.kibana_url}/api/workflows/{wf_id}",
                                     headers=_kibana_headers(self.api_key),
                                 )
-                                deleted += 1
+                                if dr.status_code < 300:
+                                    deleted += 1
+                                    cleaned.append(
+                                        f"workflow {wf_name!r} ({wf_id})"
+                                    )
                             break
         except Exception:
             pass
@@ -1617,28 +1836,30 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                 )
                 if r.status_code < 300:
                     deleted += 1
+                    cleaned.append(f"agent_builder agent {agent_id!r}")
             except Exception:
                 pass
 
-        # Delete ALL known tool IDs (shared + scenario-specific)
-        all_tool_ids = {
-            "search_error_logs", "search_subsystem_health", "search_service_logs",
-            "search_known_anomalies", "trace_anomaly_propagation",
-            "browse_recent_errors", "remediation_action", "escalation_action",
-        }
-        # Add each scenario's assessment tool ID
+        # Delete ALL tool IDs for every scenario (prefixed ids + workflow tools)
+        all_tool_ids: set[str] = set()
         for s_meta in all_scenarios:
             try:
                 s = get_scenario(s_meta["id"])
-                all_tool_ids.add(s.assessment_tool_config["id"])
+                for t in s.tool_definitions:
+                    all_tool_ids.add(t["id"])
+                all_tool_ids.add(s.prefixed_tool_id("remediation_action"))
+                all_tool_ids.add(s.prefixed_tool_id("escalation_action"))
             except Exception:
                 pass
         for tool_id in all_tool_ids:
             try:
-                client.delete(
+                tr = client.delete(
                     f"{self.kibana_url}/api/agent_builder/tools/{tool_id}",
                     headers=_kibana_headers(self.api_key),
                 )
+                if tr.status_code < 300:
+                    deleted += 1
+                    cleaned.append(f"agent_builder tool {tool_id!r}")
             except Exception:
                 pass
 
@@ -1652,6 +1873,9 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                 )
                 if r.status_code < 300:
                     deleted += 1
+                    cleaned.append(
+                        f"saved_object dashboard {ns!r}-exec-dashboard"
+                    )
             except Exception:
                 pass
 
@@ -1672,37 +1896,55 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                     )
                     if r.status_code < 300:
                         deleted += 1
+                        cleaned.append(f"Elasticsearch index {ns!r}-{suffix}")
                 except Exception:
                     pass
 
-        # Reset OTLP metric data streams so TSDB mappings are recreated fresh.
-        # This ensures new metric fields (added to generators after the data stream
-        # was first created) are included in the mapping.  The OTLP integration
-        # recreates these automatically once generators start sending data.
-        for ds_pattern in [
-            "metrics-*.otel-*",
-        ]:
-            try:
-                resp = client.get(
-                    f"{self.elastic_url}/_data_stream/{ds_pattern}",
-                    headers=_es_headers(self.api_key),
-                )
-                if resp.status_code < 300:
-                    streams = resp.json().get("data_streams", [])
-                    for ds in streams:
-                        ds_name = ds.get("name", "")
-                        if ds_name:
-                            r = client.delete(
-                                f"{self.elastic_url}/_data_stream/{ds_name}",
-                                headers=_es_headers(self.api_key),
-                            )
-                            if r.status_code < 300:
-                                deleted += 1
-                                logger.info("Deleted data stream %s for mapping refresh", ds_name)
-            except Exception as exc:
-                logger.warning("Data stream cleanup error (non-fatal): %s", exc)
+        # DISABLED: Elasticsearch DELETE /_data_stream/{ds_name} for metrics-*.otel-*.
+        # Original intent: TSDB mapping refresh when generators add new metric fields.
+        # Re-enable by removing `if False:` and un-indenting the block.
+        if False:
+            # Reset OTLP metric data streams so TSDB mappings are recreated fresh.
+            # This ensures new metric fields (added to generators after the data stream
+            # was first created) are included in the mapping.  The OTLP integration
+            # recreates these automatically once generators start sending data.
+            for ds_pattern in [
+                "metrics-*.otel-*",
+            ]:
+                try:
+                    resp = client.get(
+                        f"{self.elastic_url}/_data_stream/{ds_pattern}",
+                        headers=_es_headers(self.api_key),
+                    )
+                    if resp.status_code < 300:
+                        streams = resp.json().get("data_streams", [])
+                        for ds in streams:
+                            ds_name = ds.get("name", "")
+                            if ds_name:
+                                r = client.delete(
+                                    f"{self.elastic_url}/_data_stream/{ds_name}",
+                                    headers=_es_headers(self.api_key),
+                                )
+                                if r.status_code < 300:
+                                    deleted += 1
+                                    cleaned.append(
+                                        f"Elasticsearch data stream {ds_name!r}"
+                                    )
+                                    logger.info(
+                                        "Deleted data stream %s for mapping refresh",
+                                        ds_name,
+                                    )
+                except Exception as exc:
+                    logger.warning("Data stream cleanup error (non-fatal): %s", exc)
 
-        logger.info("Cleaned up %d artifacts across all scenarios", deleted)
+        if cleaned:
+            logger.info(
+                "Cleaned up %d artifacts across all scenarios: %s",
+                deleted,
+                "; ".join(cleaned),
+            )
+        else:
+            logger.info("Cleaned up %d artifacts across all scenarios", deleted)
         return deleted
 
     @classmethod
@@ -1790,7 +2032,8 @@ When the user asks you to fix or remediate this issue, use remediation_action to
         )
         # Collect tool IDs from scenario's tool_definitions + workflow tools
         tool_ids = [t["id"] for t in self.scenario.tool_definitions]
-        tool_ids.extend(["remediation_action", "escalation_action"])
+        tool_ids.append(self.scenario.prefixed_tool_id("remediation_action"))
+        tool_ids.append(self.scenario.prefixed_tool_id("escalation_action"))
         for tool_id in tool_ids:
             client.delete(
                 f"{self.kibana_url}/api/agent_builder/tools/{tool_id}",
@@ -1800,13 +2043,15 @@ When the user asks you to fix or remediate this issue, use remediation_action to
     def _cleanup_significant_events(self, client: httpx.Client):
         """Delete stream queries for this namespace."""
         try:
-            stream = self._wired_logs_stream_name(client)
-            enc = quote(stream, safe="")
-            resp = client.get(
-                f"{self.kibana_url}/api/streams/{enc}/queries",
-                headers=_kibana_headers(self.api_key),
-            )
-            if resp.status_code < 300:
+            hdr = _kibana_headers(self.api_key)
+            for stream in self._logs_stream_candidates(client):
+                enc = quote(stream, safe="")
+                resp = client.get(
+                    f"{self.kibana_url}/api/streams/{enc}/queries",
+                    headers=hdr,
+                )
+                if resp.status_code >= 300:
+                    continue
                 data = resp.json()
                 queries = data if isinstance(data, list) else data.get("queries", [])
                 for q in queries:
@@ -1815,7 +2060,7 @@ When the user asks you to fix or remediate this issue, use remediation_action to
                         qe = quote(qid, safe="")
                         client.delete(
                             f"{self.kibana_url}/api/streams/{enc}/queries/{qe}",
-                            headers=_kibana_headers(self.api_key),
+                            headers=hdr,
                         )
         except Exception:
             pass

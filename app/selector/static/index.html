@@ -418,6 +418,24 @@
             color: var(--teal);
             text-decoration: none;
         }
+
+        .locked-creds-note {
+            background: rgba(66, 133, 244, 0.12);
+            border: 1px solid rgba(66, 133, 244, 0.35);
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin-bottom: 16px;
+            font-size: 14px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+        .locked-creds-note code {
+            font-size: 12px;
+            color: var(--text-primary);
+        }
+        .locked-creds-note .err-text {
+            color: #f85149;
+        }
     </style>
 </head>
 <body>
@@ -449,7 +467,8 @@
     <!-- Connection Panel -->
     <div class="connection">
         <div class="connection-panel" id="connection-panel">
-            <h2>Connection Settings</h2>
+            <h2 id="connection-heading">Connection Settings</h2>
+            <div id="connection-form-wrapper">
             <div class="form-grid">
                 <div class="form-group">
                     <label>Kibana URL</label>
@@ -473,11 +492,13 @@
                     </div>
                 </div>
             </details>
+            </div>
+            <div id="locked-creds-note" class="locked-creds-note" style="display: none;" aria-live="polite"></div>
             <div class="btn-row">
                 <button class="btn btn-secondary" onclick="testConnection()">
                     <span class="btn-icon">&#9889;</span>Test Connection
                 </button>
-                <button class="btn btn-primary" onclick="launchScenario()" id="launch-btn" disabled>
+                <button class="btn btn-primary" type="button" id="launch-btn" disabled>
                     <span class="btn-icon">&#9654;</span>Launch
                 </button>
                 <span class="status-msg" id="status-msg"></span>
@@ -504,13 +525,60 @@
         financial: '\uD83D\uDCB9',
         healthcare: '\uD83C\uDFE5',
         gaming: '\uD83C\uDFAE',
+        banking: '\uD83C\uDFE6',
+        gcp: '\u2601\uFE0F',
     };
 
     let scenarios = [];
     let selectedScenario = null;
     let activeDeployments = [];
+    /** 'launch' = run deploy; 'open-app' = navigate to landing for deployment_id */
+    let launchBtnBehavior = 'launch';
+    let openAppDeploymentId = null;
+    /** Server uses DEMO_* env only; API key never sent to browser. */
+    let credentialsLocked = false;
+    let serverCredentialsConfigured = true;
+
+    function escapeHtml(s) {
+        if (!s) return '';
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    function applyCredentialsLockedUi(pc) {
+        const formWrap = document.getElementById('connection-form-wrapper');
+        const note = document.getElementById('locked-creds-note');
+        const heading = document.getElementById('connection-heading');
+        if (!credentialsLocked) return;
+        if (formWrap) formWrap.style.display = 'none';
+        if (heading) heading.textContent = 'Deploy';
+        if (note) {
+            note.style.display = 'block';
+            if (pc && pc.configured) {
+                const host = pc.kibana_host_hint ? escapeHtml(pc.kibana_host_hint) : '';
+                note.innerHTML = '<p>Elastic is pre-configured on this host'
+                    + (host ? ' (<strong>' + host + '</strong>)' : '')
+                    + '. Credentials are not entered in the browser.</p>';
+            } else {
+                note.innerHTML = '<p class="err-text">Server misconfiguration: set <code>DEMO_KIBANA_URL</code> and '
+                    + '<code>DEMO_ELASTIC_API_KEY</code> in the environment and restart the app.</p>';
+            }
+        }
+        syncLaunchButton();
+    }
 
     async function init() {
+        try {
+            const pc = await (await fetch('/api/setup/public-config')).json();
+            credentialsLocked = !!pc.credentials_locked;
+            serverCredentialsConfigured = pc.configured !== false;
+            applyCredentialsLockedUi(pc);
+        } catch (e) {
+            credentialsLocked = false;
+            serverCredentialsConfigured = true;
+        }
+
         // Load scenarios
         try {
             scenarios = await (await fetch('/api/scenarios')).json();
@@ -537,6 +605,51 @@
             const isRunning = activeDeployments.some(d => d.scenario_id === c.dataset.id && d.running);
             if (badge) badge.style.display = isRunning ? 'inline-block' : 'none';
         });
+        syncLaunchButton();
+    }
+
+    function onLaunchButtonClick() {
+        if (launchBtnBehavior === 'open-app' && openAppDeploymentId) {
+            window.location.href = '/home?deployment_id=' + encodeURIComponent(openAppDeploymentId);
+            return;
+        }
+        launchScenario();
+    }
+
+    /** Align Launch / Open app / Complete button with current selection and deployment list. */
+    function syncLaunchButton() {
+        const launchBtn = document.getElementById('launch-btn');
+        if (!launchBtn) return;
+
+        if (credentialsLocked && !serverCredentialsConfigured) {
+            launchBtn.disabled = true;
+            launchBtn.innerHTML = '<span class="btn-icon">&#9654;</span>Launch';
+            launchBtnBehavior = 'launch';
+            openAppDeploymentId = null;
+            return;
+        }
+
+        if (!selectedScenario) {
+            launchBtn.disabled = true;
+            launchBtn.innerHTML = '<span class="btn-icon">&#9654;</span>Launch';
+            launchBtnBehavior = 'launch';
+            openAppDeploymentId = null;
+            return;
+        }
+
+        const dep = activeDeployments.find(d => d.scenario_id === selectedScenario && d.running);
+        if (dep) {
+            launchBtn.disabled = false;
+            launchBtn.innerHTML = '<span class="btn-icon">&#10003;</span>Running — Open app';
+            launchBtnBehavior = 'open-app';
+            openAppDeploymentId = dep.deployment_id;
+            return;
+        }
+
+        launchBtn.disabled = false;
+        launchBtn.innerHTML = '<span class="btn-icon">&#9654;</span>Launch';
+        launchBtnBehavior = 'launch';
+        openAppDeploymentId = null;
     }
 
     function renderDeploymentsBanner() {
@@ -602,7 +715,7 @@
             c.classList.toggle('selected', c.dataset.id === id);
         });
         document.getElementById('connection-panel').classList.add('visible');
-        document.getElementById('launch-btn').disabled = false;
+        syncLaunchButton();
     }
 
     function deriveUrls() {
@@ -627,6 +740,8 @@
             const el = document.getElementById(id);
             if (el) el.addEventListener('input', () => { el.dataset.manual = '1'; });
         });
+        const launchBtn = document.getElementById('launch-btn');
+        if (launchBtn) launchBtn.addEventListener('click', onLaunchButtonClick);
     });
 
     async function testConnection() {
@@ -634,7 +749,7 @@
         const key = document.getElementById('api-key').value.trim();
         const msg = document.getElementById('status-msg');
 
-        if (!kibanaUrl || !key) {
+        if (!credentialsLocked && (!kibanaUrl || !key)) {
             msg.textContent = 'Enter Kibana URL and API key';
             msg.className = 'status-msg visible err';
             return;
@@ -646,31 +761,36 @@
         const esUrl = document.getElementById('es-url').value.trim() || undefined;
         const otlpUrl = document.getElementById('otlp-url').value.trim() || undefined;
 
+        const payload = { scenario_id: selectedScenario };
+        if (!credentialsLocked) {
+            payload.kibana_url = kibanaUrl;
+            payload.api_key = key;
+            if (esUrl) payload.elastic_url = esUrl;
+            if (otlpUrl) payload.otlp_url = otlpUrl;
+        }
+
         try {
             const resp = await fetch('/api/setup/test-connection', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    scenario_id: selectedScenario,
-                    kibana_url: kibanaUrl,
-                    api_key: key,
-                    elastic_url: esUrl,
-                    otlp_url: otlpUrl,
-                }),
+                body: JSON.stringify(payload),
             });
             const data = await resp.json();
             if (data.ok) {
                 let status = 'Connected! Cluster: ' + (data.cluster_name || 'OK');
                 if (data.otlp_ok) status += ' | OTLP OK';
                 else status += ' | OTLP not verified';
+                if (data.credentials_locked) status += ' (server credentials)';
                 msg.textContent = status;
                 msg.className = 'status-msg visible ok';
 
-                if (data.elastic_url && !document.getElementById('es-url').dataset.manual) {
-                    document.getElementById('es-url').value = data.elastic_url;
-                }
-                if (data.otlp_endpoint && !document.getElementById('otlp-url').dataset.manual) {
-                    document.getElementById('otlp-url').value = data.otlp_endpoint;
+                if (!credentialsLocked) {
+                    if (data.elastic_url && !document.getElementById('es-url').dataset.manual) {
+                        document.getElementById('es-url').value = data.elastic_url;
+                    }
+                    if (data.otlp_endpoint && !document.getElementById('otlp-url').dataset.manual) {
+                        document.getElementById('otlp-url').value = data.otlp_endpoint;
+                    }
                 }
             } else {
                 msg.textContent = 'Connection failed: ' + (data.error || 'Unknown error');
@@ -690,7 +810,14 @@
         const esUrl = document.getElementById('es-url').value.trim() || undefined;
         const otlpUrl = document.getElementById('otlp-url').value.trim() || undefined;
 
-        if (!kibanaUrl && !apiKey) {
+        if (credentialsLocked && !serverCredentialsConfigured) {
+            const msg = document.getElementById('status-msg');
+            msg.textContent = 'Server credentials are not configured';
+            msg.className = 'status-msg visible err';
+            return;
+        }
+
+        if (!credentialsLocked && !kibanaUrl && !apiKey) {
             window.location.href = '/home?deployment_id=' + selectedScenario;
             return;
         }
@@ -699,25 +826,26 @@
         launchBtn.disabled = true;
         launchBtn.textContent = 'Deploying...';
 
+        const launchBody = { scenario_id: selectedScenario };
+        if (!credentialsLocked) {
+            launchBody.kibana_url = kibanaUrl;
+            launchBody.api_key = apiKey;
+            if (esUrl) launchBody.elastic_url = esUrl;
+            if (otlpUrl) launchBody.otlp_url = otlpUrl;
+        }
+
         try {
             const resp = await fetch('/api/setup/launch', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    scenario_id: selectedScenario,
-                    kibana_url: kibanaUrl,
-                    api_key: apiKey,
-                    elastic_url: esUrl,
-                    otlp_url: otlpUrl,
-                }),
+                body: JSON.stringify(launchBody),
             });
             const data = await resp.json();
             if (data.error) {
                 const msg = document.getElementById('status-msg');
                 msg.textContent = 'Launch failed: ' + data.error;
                 msg.className = 'status-msg visible err';
-                launchBtn.disabled = false;
-                launchBtn.innerHTML = '<span class="btn-icon">&#9654;</span>Launch';
+                syncLaunchButton();
                 return;
             }
 
@@ -727,8 +855,7 @@
             const msg = document.getElementById('status-msg');
             msg.textContent = 'Launch error: ' + e.message;
             msg.className = 'status-msg visible err';
-            launchBtn.disabled = false;
-            launchBtn.innerHTML = '<span class="btn-icon">&#9654;</span>Launch';
+            syncLaunchButton();
         }
     }
 
@@ -764,13 +891,12 @@
             if (data.finished) {
                 const launchBtn = document.getElementById('launch-btn');
                 if (data.error) {
-                    launchBtn.textContent = 'Retry';
                     launchBtn.disabled = false;
+                    launchBtn.innerHTML = '<span class="btn-icon">&#9654;</span>Retry';
+                    launchBtnBehavior = 'launch';
+                    openAppDeploymentId = null;
                 } else {
-                    launchBtn.innerHTML = '<span class="btn-icon">&#10003;</span>Complete — Go to Dashboard';
-                    launchBtn.disabled = false;
-                    launchBtn.onclick = () => { window.location.href = '/home?deployment_id=' + (deploymentId || selectedScenario); };
-                    refreshDeployments();
+                    await refreshDeployments();
                 }
                 return;
             }
@@ -814,7 +940,7 @@
                 const msg = document.getElementById('status-msg');
                 msg.textContent = 'Teardown complete for ' + scenarioName;
                 msg.className = 'status-msg visible ok';
-                refreshDeployments();
+                await refreshDeployments();
             } else {
                 progressPanel.classList.remove('visible');
                 alert('Teardown failed: ' + (data.error || 'Unknown error'));
@@ -834,7 +960,7 @@
             if (data.finished) {
                 const progressPanel = document.getElementById('progress-panel');
                 progressPanel.querySelector('h2').textContent = scenarioName + ' removed';
-                refreshDeployments();
+                await refreshDeployments();
                 // Hide progress after a short delay
                 setTimeout(() => {
                     progressPanel.classList.remove('visible');

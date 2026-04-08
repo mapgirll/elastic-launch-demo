@@ -709,9 +709,11 @@ POST /api/alerting/rule
 Use the built-in `.workflows` system action to trigger workflows directly from alert rules.
 No need to create a webhook connector — the system connector ID is `system-connector-.workflows`.
 
+**Deployer default (Kibana rule UI):** put the runner in **`systemActions`**, not `actions`, so opening the rule does not error with `Object type ".workflows" is not registered` (the UI otherwise treats `actions[].id` as a connector saved object).
+
 ```json
-"actions": [{
-  "group": "query matched",
+"actions": [],
+"systemActions": [{
   "id": "system-connector-.workflows",
   "params": {
     "subAction": "run",
@@ -724,14 +726,24 @@ No need to create a webhook connector — the system connector ID is `system-con
         "severity": "high"
       }
     }
-  },
-  "frequency": {
-    "summary": false,
-    "notify_when": "onActiveAlert",
-    "throttle": null
   }
 }]
 ```
+
+**Legacy shape** (older stacks that reject `systemActions`): same `params` inside `actions` with `group` + `frequency`:
+
+```json
+"actions": [{
+  "group": "query matched",
+  "id": "system-connector-.workflows",
+  "frequency": { "summary": false, "notify_when": "onActiveAlert", "throttle": null },
+  "params": { "subAction": "run", "subActionParams": { "workflowId": "...", "inputs": { ... } } }
+}]
+```
+
+**Deployer behavior:** By default the Python deployer posts the **`systemActions`** shape first. If Kibana returns **400** because `systemActions` is not defined for that API version, it **retries with the legacy `actions` shape** for that rule and then uses **legacy only for the remaining rules** in the same deploy (see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)).
+
+Set `ELASTIC_ALERT_LEGACY_WORKFLOW_ACTION=1` when deploying to **skip `systemActions` entirely** and use the legacy shape for every rule (no probe, no double POST).
 
 **CRITICAL:**
 - `.workflows` is a **system action type** — you CANNOT create a connector for it (`POST /api/actions/connector` returns "System action creation is forbidden")

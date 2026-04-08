@@ -14,6 +14,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import (
     ACTIVE_SCENARIO, APP_HOST, APP_PORT, CHANNEL_REGISTRY,
+    CREDENTIALS_LOCKED, DEMO_ELASTIC_API_KEY, DEMO_ELASTIC_URL,
+    DEMO_KIBANA_URL, DEMO_OTLP_URL,
     MISSION_ID, MISSION_NAME, NAMESPACE, SERVICES,
 )
 
@@ -33,6 +35,12 @@ from app.store import ChaosStore, DeploymentStore
 registry = InstanceRegistry()
 store = DeploymentStore()
 chaos_store = ChaosStore()
+
+
+def _purge_deployment_records(deployment_id: str) -> None:
+    """Drop deployment row and any persisted chaos channels for this id."""
+    store.delete(deployment_id)
+    chaos_store.delete_channels_for_deployment(deployment_id)
 
 # In-memory progress trackers keyed by deployment_id
 _deploy_progress: dict[str, dict] = {}
@@ -74,6 +82,17 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Failed to restore deployment %s", rec["deployment_id"])
             store.set_status(rec["deployment_id"], "error")
+
+    if CREDENTIALS_LOCKED:
+        if not DEMO_KIBANA_URL or not DEMO_ELASTIC_API_KEY:
+            logger.warning(
+                "DEMO_CREDENTIALS_LOCKED is set but DEMO_KIBANA_URL or DEMO_ELASTIC_API_KEY "
+                "is missing — launch will fail until both are set in the environment."
+            )
+        else:
+            logger.info(
+                "Demo credentials locked: Kibana/ES API key read only from server environment."
+            )
 
     yield
 
@@ -178,6 +197,37 @@ def _get_default_creds() -> tuple[str, str, str]:
     return "", "", ""
 
 
+def _server_elastic_credentials(body: dict | None) -> tuple[str, str, str, str] | None:
+    """Resolve (kibana_url, api_key, elastic_url, explicit_otlp) for deploy/test.
+
+    When CREDENTIALS_LOCKED, values come only from environment variables.
+    Otherwise body fields and SQLite fallback are used (client-supplied key).
+    Returns None if required values are missing.
+    """
+    body = body or {}
+    if CREDENTIALS_LOCKED:
+        kibana_url = DEMO_KIBANA_URL
+        api_key = DEMO_ELASTIC_API_KEY
+        elastic_url = DEMO_ELASTIC_URL
+        if not elastic_url and kibana_url and ".kb." in kibana_url:
+            elastic_url = kibana_url.replace(".kb.", ".es.")
+        explicit_otlp = DEMO_OTLP_URL
+    else:
+        def_elastic, def_kibana, def_key = _get_default_creds()
+        kibana_url = (body.get("kibana_url") or def_kibana or "").strip().rstrip("/")
+        api_key = (body.get("api_key") or def_key or "").strip()
+        elastic_url = (body.get("elastic_url") or "").strip().rstrip("/")
+        if not elastic_url and kibana_url and ".kb." in kibana_url:
+            elastic_url = kibana_url.replace(".kb.", ".es.")
+        if not elastic_url:
+            elastic_url = def_elastic
+        explicit_otlp = (body.get("otlp_url") or "").strip().rstrip("/")
+
+    if not kibana_url or not api_key:
+        return None
+    return kibana_url, api_key, elastic_url, explicit_otlp
+
+
 # ── Scenario Selector (new front page) ───────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -234,11 +284,16 @@ async def dashboard_page(deployment_id: Optional[str] = None):
 
 @app.websocket("/ws/dashboard")
 async def ws_dashboard(websocket: WebSocket):
-    inst = _get_instance()
+    # Must accept before reject; otherwise ASGI/Starlette can surface HTTP 403 to clients.
+    await websocket.accept()
+    q = websocket.query_params
+    dep_raw = q.get("deployment_id") or q.get("deploymentId") or ""
+    dep_id = dep_raw.strip() or None
+    inst = _get_instance(dep_id)
     if not inst:
-        await websocket.close(1000)
+        await websocket.close(code=1008, reason="no_active_deployment")
         return
-    await inst.dashboard_ws.connect(websocket)
+    await inst.dashboard_ws.connect(websocket, already_accepted=True)
     try:
         while True:
             data = await websocket.receive_text()
@@ -352,7 +407,7 @@ async def remove_deployment(deployment_id: str):
     inst = registry.remove(deployment_id)
     if inst:
         inst.stop()
-    store.delete(deployment_id)
+    _purge_deployment_records(deployment_id)
     return {"status": "removed", "deployment_id": deployment_id}
 
 
@@ -608,28 +663,50 @@ async def send_daily_update(body: dict):
 
 # ── Setup / Deployer API ───────────────────────────────────────────────────
 
+@app.get("/api/setup/public-config")
+async def setup_public_config():
+    """Non-secret UI flags for the scenario selector (no API key exposed)."""
+    from urllib.parse import urlparse
+
+    hint = ""
+    if CREDENTIALS_LOCKED and DEMO_KIBANA_URL:
+        try:
+            hint = urlparse(DEMO_KIBANA_URL).netloc
+        except Exception:
+            hint = ""
+    configured = bool(
+        CREDENTIALS_LOCKED and DEMO_KIBANA_URL and DEMO_ELASTIC_API_KEY
+    )
+    return {
+        "credentials_locked": CREDENTIALS_LOCKED,
+        "kibana_host_hint": hint,
+        "configured": configured if CREDENTIALS_LOCKED else True,
+    }
+
+
 @app.post("/api/setup/test-connection")
 async def test_connection(body: dict):
     """Test connectivity to an Elastic environment."""
     from scenarios import get_scenario as _get_scenario_by_id
     from elastic_config.deployer import ScenarioDeployer
 
-    kibana_url = body.get("kibana_url", "").strip().rstrip("/")
-    api_key = body.get("api_key", "").strip()
+    resolved = _server_elastic_credentials(body)
+    if not resolved:
+        err = (
+            "Server demo credentials are not configured (set DEMO_KIBANA_URL and "
+            "DEMO_ELASTIC_API_KEY)"
+            if CREDENTIALS_LOCKED
+            else "Missing kibana_url or api_key"
+        )
+        return {"ok": False, "error": err}
 
-    if not kibana_url or not api_key:
-        return {"ok": False, "error": "Missing kibana_url or api_key"}
-
-    # Derive ES URL from Kibana URL unless explicitly provided
-    elastic_url = (body.get("elastic_url") or "").strip().rstrip("/")
-    if not elastic_url and ".kb." in kibana_url:
-        elastic_url = kibana_url.replace(".kb.", ".es.")
+    kibana_url, api_key, elastic_url, explicit_otlp = resolved
 
     if not elastic_url:
-        return {"ok": False, "error": "Cannot derive Elasticsearch URL — provide it in Advanced settings"}
+        return {"ok": False, "error": "Cannot derive Elasticsearch URL — set DEMO_ELASTIC_URL or use a .kb. Kibana URL"}
 
-    # Derive OTLP endpoint
-    otlp_url = body.get("otlp_url") or ""
+    # OTLP: explicit from env/body, else derive from Kibana Cloud hostname
+    otlp_url = explicit_otlp
     if not otlp_url and ".kb." in kibana_url:
         otlp_url = kibana_url.replace(".kb.", ".ingest.").rstrip("/")
         if not otlp_url.endswith(":443"):
@@ -639,6 +716,7 @@ async def test_connection(body: dict):
     scenario = _get_scenario_by_id(scenario_id)
     deployer = ScenarioDeployer(scenario, elastic_url, kibana_url, api_key)
     result = deployer.check_connection()
+    result["credentials_locked"] = CREDENTIALS_LOCKED
 
     # Also verify OTLP if we have an endpoint
     if result.get("ok") and otlp_url:
@@ -669,25 +747,28 @@ async def launch_setup(body: dict):
     from app.instance import ScenarioInstance
 
     scenario_id = body.get("scenario_id", ACTIVE_SCENARIO)
-    _def_elastic, _def_kibana, _def_key = _get_default_creds()
-    kibana_url = body.get("kibana_url", _def_kibana).strip().rstrip("/")
-    api_key = body.get("api_key", _def_key).strip()
+    resolved = _server_elastic_credentials(body)
+    if not resolved:
+        err = (
+            "Server demo credentials are not configured (set DEMO_KIBANA_URL and "
+            "DEMO_ELASTIC_API_KEY on the host)"
+            if CREDENTIALS_LOCKED
+            else "Missing kibana_url or api_key"
+        )
+        return JSONResponse(status_code=400, content={"error": err})
 
-    # Derive ES URL from Kibana URL unless explicitly provided
-    elastic_url = (body.get("elastic_url") or "").strip().rstrip("/")
-    if not elastic_url and ".kb." in kibana_url:
-        elastic_url = kibana_url.replace(".kb.", ".es.")
+    kibana_url, api_key, elastic_url, explicit_otlp = resolved
+
     if not elastic_url:
-        elastic_url = _def_elastic
-
-    if not kibana_url or not api_key:
         return JSONResponse(
             status_code=400,
-            content={"error": "Missing kibana_url or api_key"},
+            content={
+                "error": (
+                    "Cannot derive Elasticsearch URL — set DEMO_ELASTIC_URL or use a "
+                    "Elastic Cloud Kibana URL containing .kb."
+                ),
+            },
         )
-
-    # Explicit OTLP override from Advanced settings
-    explicit_otlp = body.get("otlp_url") or ""
 
     scenario = _get_scenario_by_id(scenario_id)
     deployer = ScenarioDeployer(scenario, elastic_url, kibana_url, api_key)
@@ -727,7 +808,11 @@ async def launch_setup(body: dict):
 
             # Reconfigure OTLP if we have an endpoint
             if otlp_endpoint:
-                instance.otlp.reconfigure(otlp_endpoint, api_key)
+                instance.otlp.reconfigure(
+                    otlp_endpoint,
+                    api_key,
+                    scope_name=scenario.otlp_scope_name,
+                )
                 logger.info("OTLPClient for %s reconfigured to %s", scenario_id, otlp_endpoint)
 
             instance.start()
@@ -847,7 +932,7 @@ async def stop_and_teardown(body: dict = {}):
 
                 def _run_teardown():
                     deployer.teardown_with_progress(callback=_progress_cb)
-                    store.delete(deployment_id)
+                    _purge_deployment_records(deployment_id)
 
                 _teardown_progress[deployment_id] = {"finished": False, "error": "", "steps": []}
                 thread = threading.Thread(target=_run_teardown, daemon=True)
@@ -855,7 +940,7 @@ async def stop_and_teardown(body: dict = {}):
 
                 return {"status": "stopping", "deployment_id": deployment_id}
 
-        store.delete(deployment_id)
+        _purge_deployment_records(deployment_id)
         # No credentials — mark as instantly done
         _teardown_progress[deployment_id] = {"finished": True, "error": "", "steps": []}
         return {"status": "stopping", "deployment_id": deployment_id}
@@ -873,9 +958,9 @@ async def stop_and_teardown(body: dict = {}):
 
         result = ScenarioDeployer.cleanup_all(elastic_url, kibana_url, api_key)
 
-        # Clear all deployment records from store
+        # Clear all deployment records and chaos channel rows
         for rec in store.get_all_active():
-            store.delete(rec["deployment_id"])
+            _purge_deployment_records(rec["deployment_id"])
 
         return {
             "ok": result.get("ok", False),

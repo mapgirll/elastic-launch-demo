@@ -18,8 +18,9 @@ class DashboardWebSocket:
     def __init__(self):
         self._connections: list[WebSocket] = []
 
-    async def connect(self, websocket: WebSocket) -> None:
-        await websocket.accept()
+    async def connect(self, websocket: WebSocket, *, already_accepted: bool = False) -> None:
+        if not already_accepted:
+            await websocket.accept()
         self._connections.append(websocket)
         logger.info("Dashboard client connected (%d total)", len(self._connections))
 

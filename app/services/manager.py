@@ -121,6 +121,7 @@ class ServiceManager:
                 "entry_endpoints": scenario.entry_endpoints,
                 "db_operations": scenario.db_operations,
                 "scenario": scenario,
+                "otlp_scope_name": scenario.otlp_scope_name,
             }
 
         # Trace generator needs chaos_controller and scenario_data

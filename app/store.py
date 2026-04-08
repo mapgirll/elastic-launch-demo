@@ -214,6 +214,15 @@ class ChaosStore:
                 ).fetchall()
                 return [dict(r) for r in rows]
 
+    def delete_channels_for_deployment(self, deployment_id: str) -> None:
+        """Remove all persisted chaos rows for a deployment (e.g. on teardown)."""
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    "DELETE FROM chaos_channels WHERE deployment_id = ?",
+                    (deployment_id,),
+                )
+
     def validate_session(self, deployment_id: str, session_id: str) -> list[int]:
         """Return list of channel IDs owned by this session_id."""
         with self._lock:

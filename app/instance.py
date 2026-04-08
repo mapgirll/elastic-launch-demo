@@ -36,6 +36,7 @@ class ScenarioInstance:
         self.otlp = OTLPClient(
             endpoint=ctx.otlp_endpoint or None,
             api_key=ctx.otlp_api_key or None,
+            scope_name=ctx.scenario.otlp_scope_name,
         )
 
         # Per-instance chaos controller with this scenario's channel registry

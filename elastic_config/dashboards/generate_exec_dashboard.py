@@ -42,11 +42,6 @@ import json
 import os
 import uuid
 
-DATA_VIEW_ID_LOGS = "logs*"
-DATA_VIEW_ID_TRACES = "traces-*"
-DATA_VIEW_ID_METRICS = "metrics-*"
-
-
 def uid():
     """Generate a random UUID for layer/column IDs."""
     return str(uuid.uuid4())
@@ -360,7 +355,20 @@ def generate_dashboard_ndjson(scenario) -> str:
         for ch in scenario.channel_registry.values()
     ]
 
-    return _build_dashboard_ndjson(scenario_name, namespace, cloud_groups, dashboard_id, error_types)
+    ns_dv = namespace.replace(".", "-")
+    dv_logs = f"{ns_dv}-dv-logs-star"
+    dv_traces = f"{ns_dv}-dv-traces"
+    dv_metrics = f"{ns_dv}-dv-metrics"
+    return _build_dashboard_ndjson(
+        scenario_name,
+        namespace,
+        cloud_groups,
+        dashboard_id,
+        error_types,
+        dv_logs,
+        dv_traces,
+        dv_metrics,
+    )
 
 
 def _build_dashboard_ndjson(
@@ -368,7 +376,10 @@ def _build_dashboard_ndjson(
     namespace: str,
     cloud_groups: list[dict],
     dashboard_id: str,
-    error_types: "list[str] | None" = None,
+    error_types: "list[str] | None",
+    dv_logs: str,
+    dv_traces: str,
+    dv_metrics: str,
 ) -> str:
     """Build the full dashboard NDJSON from parameters."""
     TILE_WIDTH = 5
@@ -411,7 +422,7 @@ def _build_dashboard_ndjson(
             cid = uid()
             kql = f'resource.attributes.service.name: "{svc_name}" AND status.code: Error'
             columns = {cid: col_count(label="Errors", kql_filter=kql)}
-            layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+            layer = make_layer(lid, [cid], columns, dv_traces)
             state = make_state(layer, {
                 "layerId": lid,
                 "layerType": "data",
@@ -427,7 +438,7 @@ def _build_dashboard_ndjson(
                 svc_name,
                 "lnsMetric",
                 state,
-                [make_ref(DATA_VIEW_ID_TRACES, lid)],
+                [make_ref(dv_traces, lid)],
             ))
 
     # Row 2 (y=8, h=6): K8s Tiles per Cloud Region
@@ -444,7 +455,7 @@ def _build_dashboard_ndjson(
         lid = uid()
         cid = uid()
         columns = {cid: col_average("metrics.k8s.node.cpu.utilization", label="CPU %")}
-        layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
+        layer = make_layer(lid, [cid], columns, dv_metrics)
         cluster_name = group.get("cluster", "")
         cpu_query = f'resource.attributes.k8s.cluster.name: "{cluster_name}"' if cluster_name else ""
         state = make_state(layer, {
@@ -456,7 +467,7 @@ def _build_dashboard_ndjson(
         }, query=cpu_query)
         panels.append(make_panel(pid,
             {"h": 6, "i": pid, "w": left_w, "x": x_base, "y": 8},
-            "Node CPU", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+            "Node CPU", "lnsMetric", state, [make_ref(dv_metrics, lid)]))
 
         # Node Memory tile (right half of column) — scoped to this cluster
         k8s_tile_idx += 1
@@ -464,7 +475,7 @@ def _build_dashboard_ndjson(
         lid = uid()
         cid = uid()
         columns = {cid: col_average("metrics.k8s.node.memory.utilization", label="Mem %")}
-        layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
+        layer = make_layer(lid, [cid], columns, dv_metrics)
         mem_query = f'resource.attributes.k8s.cluster.name: "{cluster_name}"' if cluster_name else ""
         state = make_state(layer, {
             "layerId": lid,
@@ -475,7 +486,7 @@ def _build_dashboard_ndjson(
         }, query=mem_query)
         panels.append(make_panel(pid,
             {"h": 6, "i": pid, "w": right_w, "x": x_base + left_w, "y": 8},
-            "Node Memory", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+            "Node Memory", "lnsMetric", state, [make_ref(dv_metrics, lid)]))
 
     # ── Section 2 (y=14): RED Metrics ──────────────────────────────────────────
 
@@ -492,7 +503,7 @@ def _build_dashboard_ndjson(
     lid = uid()
     cid = uid()
     columns = {cid: col_percentile("duration", 99, "P99 Latency")}
-    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+    layer = make_layer(lid, [cid], columns, dv_traces)
     state = make_state(layer, {
         "layerId": lid,
         "layerType": "data",
@@ -502,13 +513,13 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p30",
         {"h": 6, "i": "p30", "w": 12, "x": 0, "y": 16},
-        "P99 Latency", "lnsMetric", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+        "P99 Latency", "lnsMetric", state, [make_ref(dv_traces, lid)]))
 
     # p31: P50 Latency
     lid = uid()
     cid = uid()
     columns = {cid: col_percentile("duration", 50, "P50 Latency")}
-    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+    layer = make_layer(lid, [cid], columns, dv_traces)
     state = make_state(layer, {
         "layerId": lid,
         "layerType": "data",
@@ -518,13 +529,13 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p31",
         {"h": 6, "i": "p31", "w": 12, "x": 12, "y": 16},
-        "P50 Latency", "lnsMetric", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+        "P50 Latency", "lnsMetric", state, [make_ref(dv_traces, lid)]))
 
     # p32: Error Rate
     lid = uid()
     cid = uid()
     columns = {cid: col_formula("count(kql='status.code: Error') / count()", "Error Rate")}
-    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+    layer = make_layer(lid, [cid], columns, dv_traces)
     state = make_state(layer, {
         "layerId": lid,
         "layerType": "data",
@@ -534,13 +545,13 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p32",
         {"h": 6, "i": "p32", "w": 12, "x": 24, "y": 16},
-        "Error Rate", "lnsMetric", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+        "Error Rate", "lnsMetric", state, [make_ref(dv_traces, lid)]))
 
     # p33: Throughput
     lid = uid()
     cid = uid()
     columns = {cid: col_count(label="Throughput")}
-    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+    layer = make_layer(lid, [cid], columns, dv_traces)
     state = make_state(layer, {
         "layerId": lid,
         "layerType": "data",
@@ -550,7 +561,7 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p33",
         {"h": 6, "i": "p33", "w": 12, "x": 36, "y": 16},
-        "Throughput", "lnsMetric", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+        "Throughput", "lnsMetric", state, [make_ref(dv_traces, lid)]))
 
     # p34: P99 Latency Over Time (area, split by service)
     lid = uid()
@@ -562,7 +573,7 @@ def _build_dashboard_ndjson(
         cid_y: col_percentile("duration", 99, "P99 Latency"),
         cid_split: col_terms("resource.attributes.service.name", "Service", size=9, order_col_id=cid_y),
     }
-    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_TRACES)
+    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, dv_traces)
     state = make_state(layer, {
         "legend": {"isVisible": True, "position": "right"},
         "valueLabels": "hide",
@@ -579,7 +590,7 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p34",
         {"h": 12, "i": "p34", "w": 24, "x": 0, "y": 22},
-        "P99 Latency Over Time", "lnsXY", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+        "P99 Latency Over Time", "lnsXY", state, [make_ref(dv_traces, lid)]))
 
     # p35: Error Rate by Service (bar_stacked)
     lid = uid()
@@ -591,7 +602,7 @@ def _build_dashboard_ndjson(
         cid_y: col_formula("count(kql='status.code: Error') / count()", "Error Rate"),
         cid_split: col_terms("resource.attributes.service.name", "Service", size=9),
     }
-    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_TRACES)
+    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, dv_traces)
     state = make_state(layer, {
         "legend": {"isVisible": True, "position": "right"},
         "valueLabels": "hide",
@@ -608,7 +619,7 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p35",
         {"h": 12, "i": "p35", "w": 24, "x": 24, "y": 22},
-        "Error Rate by Service", "lnsXY", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+        "Error Rate by Service", "lnsXY", state, [make_ref(dv_traces, lid)]))
 
     # ── Section 3 (y=34): USE Metrics ──────────────────────────────────────────
 
@@ -625,7 +636,7 @@ def _build_dashboard_ndjson(
     lid = uid()
     cid = uid()
     columns = {cid: col_average("metrics.system.cpu.load_average.1m", label="CPU Load")}
-    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
+    layer = make_layer(lid, [cid], columns, dv_metrics)
     state = make_state(layer, {
         "layerId": lid,
         "layerType": "data",
@@ -635,13 +646,13 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p36",
         {"h": 6, "i": "p36", "w": 12, "x": 0, "y": 36},
-        "CPU Load (1m)", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+        "CPU Load (1m)", "lnsMetric", state, [make_ref(dv_metrics, lid)]))
 
     # p37: Disk Utilization
     lid = uid()
     cid = uid()
     columns = {cid: col_average("metrics.system.filesystem.utilization", label="Disk Util")}
-    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
+    layer = make_layer(lid, [cid], columns, dv_metrics)
     state = make_state(layer, {
         "layerId": lid,
         "layerType": "data",
@@ -651,13 +662,13 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p37",
         {"h": 6, "i": "p37", "w": 12, "x": 12, "y": 36},
-        "Disk Utilization", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+        "Disk Utilization", "lnsMetric", state, [make_ref(dv_metrics, lid)]))
 
     # p38: Container Restarts
     lid = uid()
     cid = uid()
     columns = {cid: col_max("metrics.k8s.container.restarts", label="Restarts")}
-    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
+    layer = make_layer(lid, [cid], columns, dv_metrics)
     state = make_state(layer, {
         "layerId": lid,
         "layerType": "data",
@@ -667,13 +678,13 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p38",
         {"h": 6, "i": "p38", "w": 12, "x": 24, "y": 36},
-        "Container Restarts", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+        "Container Restarts", "lnsMetric", state, [make_ref(dv_metrics, lid)]))
 
     # p39: Network Errors
     lid = uid()
     cid = uid()
     columns = {cid: col_max("metrics.system.network.errors", label="Net Errors")}
-    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_METRICS)
+    layer = make_layer(lid, [cid], columns, dv_metrics)
     state = make_state(layer, {
         "layerId": lid,
         "layerType": "data",
@@ -683,7 +694,7 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p39",
         {"h": 6, "i": "p39", "w": 12, "x": 36, "y": 36},
-        "Network Errors", "lnsMetric", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+        "Network Errors", "lnsMetric", state, [make_ref(dv_metrics, lid)]))
 
     # p40: CPU Load Over Time (area, split by host)
     lid = uid()
@@ -695,7 +706,7 @@ def _build_dashboard_ndjson(
         cid_y: col_max("metrics.system.cpu.load_average.1m", label="CPU Load (1m)"),
         cid_split: col_terms("host.name", "Host", size=5, order_col_id=cid_y),
     }
-    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_METRICS)
+    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, dv_metrics)
     state = make_state(layer, {
         "legend": {"isVisible": True, "position": "right"},
         "valueLabels": "hide",
@@ -712,7 +723,7 @@ def _build_dashboard_ndjson(
     }, query="data_stream.dataset: hostmetricsreceiver.otel")
     panels.append(make_panel("p40",
         {"h": 12, "i": "p40", "w": 24, "x": 0, "y": 42},
-        "CPU Load Over Time", "lnsXY", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+        "CPU Load Over Time", "lnsXY", state, [make_ref(dv_metrics, lid)]))
 
     # p41: Disk Utilization Over Time (area, split by host)
     lid = uid()
@@ -724,7 +735,7 @@ def _build_dashboard_ndjson(
         cid_y: col_max("metrics.system.filesystem.utilization", label="Disk Utilization"),
         cid_split: col_terms("host.name", "Host", size=5, order_col_id=cid_y),
     }
-    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_METRICS)
+    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, dv_metrics)
     state = make_state(layer, {
         "legend": {"isVisible": True, "position": "right"},
         "valueLabels": "hide",
@@ -741,7 +752,7 @@ def _build_dashboard_ndjson(
     }, query="data_stream.dataset: hostmetricsreceiver.otel")
     panels.append(make_panel("p41",
         {"h": 12, "i": "p41", "w": 24, "x": 24, "y": 42},
-        "Disk Utilization Over Time", "lnsXY", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+        "Disk Utilization Over Time", "lnsXY", state, [make_ref(dv_metrics, lid)]))
 
     # ── Section 4 (y=54): APM & Infrastructure ─────────────────────────────────
 
@@ -758,7 +769,7 @@ def _build_dashboard_ndjson(
     lid = uid()
     cid = uid()
     columns = {cid: col_count(label="Transactions")}
-    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+    layer = make_layer(lid, [cid], columns, dv_traces)
     state = make_state(layer, {
         "layerId": lid,
         "layerType": "data",
@@ -768,13 +779,13 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p10",
         {"h": 6, "i": "p10", "w": 12, "x": 0, "y": 56},
-        "APM Throughput", "lnsMetric", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+        "APM Throughput", "lnsMetric", state, [make_ref(dv_traces, lid)]))
 
     # p11: APM Error Rate
     lid = uid()
     cid = uid()
     columns = {cid: col_count(label="Errors", kql_filter="status.code: Error")}
-    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_TRACES)
+    layer = make_layer(lid, [cid], columns, dv_traces)
     state = make_state(layer, {
         "layerId": lid,
         "layerType": "data",
@@ -784,13 +795,13 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p11",
         {"h": 6, "i": "p11", "w": 12, "x": 12, "y": 56},
-        "APM Error Rate", "lnsMetric", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+        "APM Error Rate", "lnsMetric", state, [make_ref(dv_traces, lid)]))
 
     # p12: NGINX Requests
     lid = uid()
     cid = uid()
     columns = {cid: col_count(label="Requests")}
-    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_LOGS)
+    layer = make_layer(lid, [cid], columns, dv_logs)
     state = make_state(layer, {
         "layerId": lid,
         "layerType": "data",
@@ -800,13 +811,13 @@ def _build_dashboard_ndjson(
     }, query="data_stream.dataset: nginx.access.otel")
     panels.append(make_panel("p12",
         {"h": 6, "i": "p12", "w": 12, "x": 24, "y": 56},
-        "NGINX Requests", "lnsMetric", state, [make_ref(DATA_VIEW_ID_LOGS, lid)]))
+        "NGINX Requests", "lnsMetric", state, [make_ref(dv_logs, lid)]))
 
     # p13: VPC Flow Volume
     lid = uid()
     cid = uid()
     columns = {cid: col_count(label="Flows")}
-    layer = make_layer(lid, [cid], columns, DATA_VIEW_ID_LOGS)
+    layer = make_layer(lid, [cid], columns, dv_logs)
     state = make_state(layer, {
         "layerId": lid,
         "layerType": "data",
@@ -816,7 +827,7 @@ def _build_dashboard_ndjson(
     }, query='data_stream.dataset: "aws.vpcflow.otel" OR data_stream.dataset: "gcp.vpcflow.otel"')
     panels.append(make_panel("p13",
         {"h": 6, "i": "p13", "w": 12, "x": 36, "y": 56},
-        "VPC Flow Volume", "lnsMetric", state, [make_ref(DATA_VIEW_ID_LOGS, lid)]))
+        "VPC Flow Volume", "lnsMetric", state, [make_ref(dv_logs, lid)]))
 
     # p14: APM Errors Over Time by Service (bar_stacked)
     lid = uid()
@@ -828,7 +839,7 @@ def _build_dashboard_ndjson(
         cid_y: col_count(label="Errors"),
         cid_split: col_terms("resource.attributes.service.name", "Service", size=9, order_col_id=cid_y),
     }
-    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_TRACES)
+    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, dv_traces)
     state = make_state(layer, {
         "legend": {"isVisible": True, "position": "right"},
         "valueLabels": "hide",
@@ -845,7 +856,7 @@ def _build_dashboard_ndjson(
     }, query="status.code: Error")
     panels.append(make_panel("p14",
         {"h": 12, "i": "p14", "w": 24, "x": 0, "y": 62},
-        "APM Errors Over Time by Service", "lnsXY", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+        "APM Errors Over Time by Service", "lnsXY", state, [make_ref(dv_traces, lid)]))
 
     # p15: Log Volume Over Time (area_stacked)
     lid = uid()
@@ -855,7 +866,7 @@ def _build_dashboard_ndjson(
         cid_x: col_date_histogram("30s"),
         cid_y: col_count(label="Log count"),
     }
-    layer = make_layer(lid, [cid_x, cid_y], columns, DATA_VIEW_ID_LOGS)
+    layer = make_layer(lid, [cid_x, cid_y], columns, dv_logs)
     state = make_state(layer, {
         "legend": {"isVisible": True, "position": "right"},
         "valueLabels": "hide",
@@ -871,7 +882,7 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p15",
         {"h": 12, "i": "p15", "w": 24, "x": 24, "y": 62},
-        "Log Volume Over Time", "lnsXY", state, [make_ref(DATA_VIEW_ID_LOGS, lid)]))
+        "Log Volume Over Time", "lnsXY", state, [make_ref(dv_logs, lid)]))
 
     # p16: NGINX Request Rate Over Time (area)
     lid = uid()
@@ -881,7 +892,7 @@ def _build_dashboard_ndjson(
         cid_x: col_date_histogram("30s"),
         cid_y: col_count(label="Requests"),
     }
-    layer = make_layer(lid, [cid_x, cid_y], columns, DATA_VIEW_ID_LOGS)
+    layer = make_layer(lid, [cid_x, cid_y], columns, dv_logs)
     state = make_state(layer, {
         "legend": {"isVisible": True, "position": "right"},
         "valueLabels": "hide",
@@ -897,7 +908,7 @@ def _build_dashboard_ndjson(
     }, query="data_stream.dataset: nginx.access.otel")
     panels.append(make_panel("p16",
         {"h": 12, "i": "p16", "w": 24, "x": 0, "y": 74},
-        "NGINX Request Rate", "lnsXY", state, [make_ref(DATA_VIEW_ID_LOGS, lid)]))
+        "NGINX Request Rate", "lnsXY", state, [make_ref(dv_logs, lid)]))
 
     # p17: VPC Flow Activity (bar_stacked, split by cloud provider)
     lid = uid()
@@ -909,7 +920,7 @@ def _build_dashboard_ndjson(
         cid_y: col_count(label="Flows"),
         cid_split: col_terms("data_stream.dataset", "Dataset", size=5, order_col_id=cid_y),
     }
-    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_LOGS)
+    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, dv_logs)
     state = make_state(layer, {
         "legend": {"isVisible": True, "position": "right"},
         "valueLabels": "hide",
@@ -926,7 +937,7 @@ def _build_dashboard_ndjson(
     }, query='data_stream.dataset: "aws.vpcflow.otel" OR data_stream.dataset: "gcp.vpcflow.otel"')
     panels.append(make_panel("p17",
         {"h": 12, "i": "p17", "w": 24, "x": 24, "y": 74},
-        "VPC Flow Activity", "lnsXY", state, [make_ref(DATA_VIEW_ID_LOGS, lid)]))
+        "VPC Flow Activity", "lnsXY", state, [make_ref(dv_logs, lid)]))
 
     # ── Section 5 (y=86): Detail ───────────────────────────────────────────────
 
@@ -947,7 +958,7 @@ def _build_dashboard_ndjson(
         cid_x: col_terms("resource.attributes.service.name", "Service", size=10, order_col_id=cid_y),
         cid_y: col_count(label="Error Count", kql_filter="status.code: Error"),
     }
-    layer = make_layer(lid, [cid_x, cid_y], columns, DATA_VIEW_ID_TRACES)
+    layer = make_layer(lid, [cid_x, cid_y], columns, dv_traces)
     state = make_state(layer, {
         "legend": {"isVisible": True, "position": "right"},
         "valueLabels": "hide",
@@ -963,7 +974,7 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p18",
         {"h": 12, "i": "p18", "w": 24, "x": 0, "y": 88},
-        "Errors by Service", "lnsXY", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+        "Errors by Service", "lnsXY", state, [make_ref(dv_traces, lid)]))
 
     # p19: Service Health Heatmap — from traces
     lid = uid()
@@ -975,7 +986,7 @@ def _build_dashboard_ndjson(
         cid_svc: col_terms("resource.attributes.service.name", "Service", size=10, order_col_id=cid_val),
         cid_val: col_count(label="Error Count", kql_filter="status.code: Error"),
     }
-    layer = make_layer(lid, [cid_time, cid_svc, cid_val], columns, DATA_VIEW_ID_TRACES)
+    layer = make_layer(lid, [cid_time, cid_svc, cid_val], columns, dv_traces)
     state = make_state(layer, {
         "gridConfig": {"isCellLabelVisible": False},
         "shape": "heatmap",
@@ -988,7 +999,7 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p19",
         {"h": 12, "i": "p19", "w": 24, "x": 24, "y": 88},
-        "Service Health Heatmap", "lnsHeatmap", state, [make_ref(DATA_VIEW_ID_TRACES, lid)]))
+        "Service Health Heatmap", "lnsHeatmap", state, [make_ref(dv_traces, lid)]))
 
     # p24: Node CPU Over Time (area, split by cluster)
     lid = uid()
@@ -1000,7 +1011,7 @@ def _build_dashboard_ndjson(
         cid_y: col_average("metrics.k8s.node.cpu.utilization", label="CPU Utilization"),
         cid_split: col_terms("resource.attributes.k8s.cluster.name", "Cluster", size=5, order_col_id=cid_y),
     }
-    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_METRICS)
+    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, dv_metrics)
     state = make_state(layer, {
         "legend": {"isVisible": True, "position": "right"},
         "valueLabels": "hide",
@@ -1017,7 +1028,7 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p24",
         {"h": 12, "i": "p24", "w": 24, "x": 0, "y": 100},
-        "Node CPU Over Time", "lnsXY", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+        "Node CPU Over Time", "lnsXY", state, [make_ref(dv_metrics, lid)]))
 
     # p25: Pod Memory by Service (bar_stacked, split by service)
     lid = uid()
@@ -1029,7 +1040,7 @@ def _build_dashboard_ndjson(
         cid_y: col_average("metrics.k8s.pod.memory.usage", label="Memory Usage"),
         cid_split: col_terms("resource.attributes.service.name", "Service", size=10, order_col_id=cid_y),
     }
-    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, DATA_VIEW_ID_METRICS)
+    layer = make_layer(lid, [cid_x, cid_split, cid_y], columns, dv_metrics)
     state = make_state(layer, {
         "legend": {"isVisible": True, "position": "right"},
         "valueLabels": "hide",
@@ -1046,7 +1057,7 @@ def _build_dashboard_ndjson(
     })
     panels.append(make_panel("p25",
         {"h": 12, "i": "p25", "w": 24, "x": 24, "y": 100},
-        "Pod Memory by Service", "lnsXY", state, [make_ref(DATA_VIEW_ID_METRICS, lid)]))
+        "Pod Memory by Service", "lnsXY", state, [make_ref(dv_metrics, lid)]))
 
     # ── Section 6 (y=112): Significant Event Logs ───────────────────────────
 

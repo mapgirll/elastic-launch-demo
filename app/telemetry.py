@@ -23,7 +23,7 @@ from app.config import (
 logger = logging.getLogger("nova7.telemetry")
 
 SCHEMA_URL = "https://opentelemetry.io/schemas/1.35.0"
-SCOPE_NAME = "elastic-launch-demo"
+SCOPE_NAME = "elastic-launch-demo"  # default when OTLPClient has no per-scenario scope
 
 
 def _format_attributes(attrs: dict[str, Any]) -> list[dict[str, Any]]:
@@ -58,10 +58,12 @@ class OTLPClient:
         endpoint: str | None = None,
         api_key: str | None = None,
         auth_type: str | None = None,
+        scope_name: str | None = None,
     ):
         self.endpoint = (endpoint or OTLP_ENDPOINT).rstrip("/")
         self.api_key = api_key or OTLP_API_KEY
         self.auth_type = auth_type or OTLP_AUTH_TYPE
+        self.scope_name = (scope_name or SCOPE_NAME).strip() or SCOPE_NAME
 
         headers = {"Content-Type": "application/json"}
         if self.api_key:
@@ -71,11 +73,19 @@ class OTLPClient:
         self.consecutive_failures = 0
         self.max_failures_before_backoff = 5
 
-    def reconfigure(self, endpoint: str, api_key: str, auth_type: str = "ApiKey"):
+    def reconfigure(
+        self,
+        endpoint: str,
+        api_key: str,
+        auth_type: str = "ApiKey",
+        scope_name: str | None = None,
+    ):
         """Update endpoint and auth for a running client."""
         self.endpoint = endpoint.rstrip("/")
         self.api_key = api_key
         self.auth_type = auth_type
+        if scope_name is not None:
+            self.scope_name = scope_name.strip() or SCOPE_NAME
         self.consecutive_failures = 0
 
         headers = {"Content-Type": "application/json"}
@@ -171,7 +181,7 @@ class OTLPClient:
                     "resource": resource,
                     "scopeLogs": [
                         {
-                            "scope": {"name": SCOPE_NAME},
+                            "scope": {"name": self.scope_name},
                             "logRecords": log_records,
                         }
                     ],
@@ -223,7 +233,7 @@ class OTLPClient:
                     "resource": metric_resource,
                     "scopeMetrics": [
                         {
-                            "scope": {"name": SCOPE_NAME},
+                            "scope": {"name": self.scope_name},
                             "metrics": metrics,
                         }
                     ],
@@ -269,7 +279,7 @@ class OTLPClient:
                     "resource": trace_resource,
                     "scopeSpans": [
                         {
-                            "scope": {"name": SCOPE_NAME},
+                            "scope": {"name": self.scope_name},
                             "spans": spans,
                         }
                     ],

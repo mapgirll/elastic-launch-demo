@@ -63,6 +63,90 @@ def _alert_rule_post_should_retry_legacy(resp: httpx.Response, used_system_actio
     return "systemactions" in err or "definition for this key is missing" in err
 
 
+def _workflow_search_normalize_items(data: Any) -> list[dict[str, Any]]:
+    """Extract workflow records from ``POST /api/workflows/search`` JSON."""
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if not isinstance(data, dict):
+        return []
+    for key in ("results", "items", "data", "workflows"):
+        raw = data.get(key)
+        if isinstance(raw, list):
+            return [x for x in raw if isinstance(x, dict)]
+    return []
+
+
+def _workflow_item_id(item: dict[str, Any]) -> str:
+    """Best-effort workflow id from list/search/create payloads."""
+    getters = (
+        lambda d: d.get("id"),
+        lambda d: d.get("workflowId"),
+        lambda d: (d.get("workflow") or {}).get("id")
+        if isinstance(d.get("workflow"), dict)
+        else None,
+        lambda d: (d.get("item") or {}).get("id")
+        if isinstance(d.get("item"), dict)
+        else None,
+        lambda d: (d.get("attributes") or {}).get("id")
+        if isinstance(d.get("attributes"), dict)
+        else None,
+    )
+    for get in getters:
+        try:
+            v = get(item)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        except Exception:
+            pass
+    return ""
+
+
+def _workflow_item_name(item: dict[str, Any]) -> str:
+    """Display name for workflow list/cleanup/search matching."""
+    getters = (
+        lambda d: d.get("name"),
+        lambda d: d.get("title"),
+        lambda d: (d.get("attributes") or {}).get("name")
+        if isinstance(d.get("attributes"), dict)
+        else None,
+        lambda d: (d.get("workflow") or {}).get("name")
+        if isinstance(d.get("workflow"), dict)
+        else None,
+    )
+    for get in getters:
+        try:
+            v = get(item)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        except Exception:
+            pass
+    return ""
+
+
+def _parse_workflow_create_response(wf_data: Any) -> str:
+    """Parse workflow id from ``POST /api/workflows`` response body."""
+    if not isinstance(wf_data, dict):
+        return ""
+    candidates: list[Any] = [wf_data.get("id"), wf_data.get("workflowId")]
+    nested = wf_data.get("workflow")
+    if isinstance(nested, dict):
+        candidates.append(nested.get("id"))
+    item = wf_data.get("item")
+    if isinstance(item, dict):
+        candidates.append(item.get("id"))
+    data = wf_data.get("data")
+    if isinstance(data, dict):
+        candidates.append(data.get("id"))
+    attrs = wf_data.get("attributes")
+    if isinstance(attrs, dict):
+        candidates.append(attrs.get("workflowId"))
+        candidates.append(attrs.get("id"))
+    for v in candidates:
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
 # ── Progress reporting ──────────────────────────────────────────────────────
 
 @dataclass
@@ -725,14 +809,18 @@ class ScenarioDeployer:
                 content=body,
             )
             if resp.status_code < 300:
-                # Extract workflow ID from response
                 try:
-                    wf_data = resp.json()
-                    wf_id = wf_data.get("id", "")
+                    wf_id = _parse_workflow_create_response(resp.json())
                     if wf_id:
                         self._workflow_ids[name] = wf_id
-                except Exception:
-                    pass
+                    else:
+                        logger.warning(
+                            "Workflow %s: create response had no id (body prefix %s)",
+                            name,
+                            (resp.text or "")[:300],
+                        )
+                except Exception as exc:
+                    logger.warning("Workflow %s: could not parse create response: %s", name, exc)
                 step.items_done += 1
                 step.detail = f"Deployed: {name}"
             else:
@@ -1562,35 +1650,76 @@ When the user asks you to fix or remediate this issue, use `{t_remediate}` with 
 
     # ── Alerting ───────────────────────────────────────────────────────
 
+    def _resolve_notification_workflow_id(self, client: httpx.Client) -> str:
+        """ID of the Significant Event Notification workflow for this scenario.
+
+        Prefer the template key from ``_deploy_workflows`` (``significant_event_notification``),
+        then fall back to search by **exact** workflow title so we do not attach
+        alert rules to unrelated or ``Untitled`` workflows.
+        """
+        tpl_key = "significant_event_notification"
+        wf_id = (self._workflow_ids.get(tpl_key) or "").strip()
+        if wf_id:
+            return wf_id
+        for name_frag, wid in self._workflow_ids.items():
+            if not wid:
+                continue
+            if name_frag == tpl_key or (
+                "significant_event" in name_frag and "notification" in name_frag
+            ):
+                return wid.strip()
+        expected_name = f"{self.scenario.scenario_name} Significant Event Notification"
+        resp = client.post(
+            f"{self.kibana_url}/api/workflows/search",
+            headers=_kibana_headers(self.api_key),
+            json={"page": 1, "size": 200},
+        )
+        if resp.status_code >= 300:
+            return ""
+        items = _workflow_search_normalize_items(resp.json())
+        exact: list[str] = []
+        fuzzy: list[str] = []
+        suffix = "Significant Event Notification"
+        sn = self.scenario.scenario_name
+        for item in items:
+            wid = _workflow_item_id(item)
+            name = _workflow_item_name(item)
+            if not wid:
+                continue
+            nl = name.lower().strip()
+            if not name or nl == "untitled":
+                continue
+            if name == expected_name:
+                exact.append(wid)
+            elif suffix in name and sn in name:
+                fuzzy.append(wid)
+        if len(exact) == 1:
+            return exact[0]
+        if len(exact) > 1:
+            logger.warning(
+                "Multiple workflows named %r; using first id %s",
+                expected_name,
+                exact[0],
+            )
+            return exact[0]
+        if len(fuzzy) == 1:
+            return fuzzy[0]
+        if len(fuzzy) > 1:
+            logger.warning(
+                "Multiple %r workflows for scenario %r; using first id %s",
+                suffix,
+                sn,
+                fuzzy[0],
+            )
+            return fuzzy[0]
+        return ""
+
     def _deploy_alerting(self, client: httpx.Client, notify: ProgressCallback):
         step = self._step(10)
         step.status = "running"
         notify(self.progress)
 
-        # Find notification workflow ID
-        notification_wf_id = ""
-        for name_frag, wf_id in self._workflow_ids.items():
-            if "notification" in name_frag or "significant" in name_frag:
-                notification_wf_id = wf_id
-                break
-
-        if not notification_wf_id:
-            # Search for it
-            resp = client.post(
-                f"{self.kibana_url}/api/workflows/search",
-                headers=_kibana_headers(self.api_key),
-                json={"page": 1, "size": 100},
-            )
-            if resp.status_code < 300:
-                try:
-                    data = resp.json()
-                    items = data if isinstance(data, list) else data.get("results", data.get("items", []))
-                    for item in items:
-                        if "Notification" in item.get("name", "") or "Significant" in item.get("name", ""):
-                            notification_wf_id = item["id"]
-                            break
-                except Exception:
-                    pass
+        notification_wf_id = self._resolve_notification_workflow_id(client)
 
         if not notification_wf_id:
             step.status = "failed"
@@ -1979,12 +2108,12 @@ When the user asks you to fix or remediate this issue, use `{t_remediate}` with 
                 json={"page": 1, "size": 100},
             )
             if resp.status_code < 300:
-                data = resp.json()
-                items = data if isinstance(data, list) else data.get("results", data.get("items", []))
+                items = _workflow_search_normalize_items(resp.json())
                 scenario_name = self.scenario.scenario_name
                 for item in items:
-                    if scenario_name in item.get("name", "") or f"{self.ns}-" in item.get("name", "").lower():
-                        wf_id = item.get("id", "")
+                    display = _workflow_item_name(item)
+                    if scenario_name in display or f"{self.ns}-" in display.lower():
+                        wf_id = _workflow_item_id(item)
                         if wf_id:
                             r = client.delete(
                                 f"{self.kibana_url}/api/workflows/{wf_id}",

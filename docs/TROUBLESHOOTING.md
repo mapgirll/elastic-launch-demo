@@ -30,6 +30,14 @@ Rules should still be created, but on stacks that required legacy you may still 
 
 ---
 
+## Debian host: locked credentials and uvicorn
+
+- **Connection form still visible with locked env:** see [DEBIAN_LOCKED_CREDENTIALS.md — Troubleshooting](DEBIAN_LOCKED_CREDENTIALS.md#troubleshooting) (`curl` public-config, systemd `EnvironmentFile`, restart).
+- **Uvicorn `illegal request line` / TLS bytes (`\x16\x03\x01`):** HTTPS client hitting plain HTTP — use `http://` to the app or terminate TLS in Nginx and `proxy_pass http://127.0.0.1:…`.
+
+---
+
 ### Related docs
 
 - [AGENTS.MD](../AGENTS.MD) — Kibana Alerting API, `systemActions` vs legacy `actions`, and workflow `event.*` context.
+- [DEBIAN_LOCKED_CREDENTIALS.md](DEBIAN_LOCKED_CREDENTIALS.md) — Server-side `DEMO_*` credentials on Debian/systemd.

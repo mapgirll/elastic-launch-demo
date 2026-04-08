@@ -276,7 +276,8 @@ elastic-launch-demo/
 │   ├── SE_QUICK_START.md           # Quick start for SEs
 │   ├── SETUP_GUIDE.md             # Full deployment guide
 │   ├── CHANNEL_REFERENCE.md       # Channel details (space scenario)
-│   └── TROUBLESHOOTING.md         # Common issues and solutions
+│   ├── TROUBLESHOOTING.md         # Common issues and solutions
+│   └── DEBIAN_LOCKED_CREDENTIALS.md  # Server-side Elastic creds on Debian/systemd
 ├── start.sh                        # Start the app
 ├── stop.sh                         # Stop the app
 ├── validate.sh                     # Comprehensive validation
@@ -297,6 +298,7 @@ elastic-launch-demo/
 | [Demo Script](docs/DEMO_SCRIPT.md) | Presenter talk track (3 acts) |
 | [Channel Reference](docs/CHANNEL_REFERENCE.md) | All 20 fault channels (space scenario) |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and solutions |
+| [Debian locked credentials](docs/DEBIAN_LOCKED_CREDENTIALS.md) | Hide Kibana/API key on the selector; use `DEMO_*` env + systemd |
 | [AGENTS.MD](AGENTS.MD) | Full Kibana and Elasticsearch API reference |
 
 ---

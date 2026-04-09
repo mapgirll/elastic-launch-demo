@@ -42,10 +42,34 @@
         updateSpikesLock();
     }
 
+    // After app restart, SQLite may restore ACTIVE faults with a stale session_id.
+    // Claim them for this tab's session before validateSession runs.
+    function ensureSessionAndAdopt() {
+        const sid = getSessionId() || generateSessionId();
+        return fetch('/api/chaos/session/adopt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: sid,
+                deployment_id: deployId || undefined,
+            }),
+        })
+            .then(r => r.json())
+            .then(data => {
+                if (data.channels && data.channels.length > 0) {
+                    myOwnedChannels = new Set(data.channels);
+                    updateSpikesLock();
+                }
+            })
+            .catch(() => { /* offline or no deployment — validateSession still runs */ });
+    }
+
     // ── Initialize ────────────────────────────────────────────
     function init() {
-        fetchChannels();
-        validateSession();
+        ensureSessionAndAdopt().then(() => {
+            validateSession();
+            fetchChannels();
+        });
         setInterval(fetchStatus, 2000);
         // Auto-populate email from X-Forwarded-User header
         fetch('/api/user/info')

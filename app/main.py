@@ -493,6 +493,30 @@ async def chaos_session_validate(session_id: str, deployment_id: Optional[str] =
     return {"valid": len(channels) > 0, "channels": channels}
 
 
+@app.post("/api/chaos/session/adopt")
+async def chaos_session_adopt(body: dict):
+    """Point all ACTIVE chaos channels at this browser session (e.g. after uvicorn restart)."""
+    session_id = (body.get("session_id") or "").strip()
+    if not session_id:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "session_id required", "channels": [], "count": 0},
+        )
+    deployment_id = body.get("deployment_id")
+    inst = _get_instance(deployment_id)
+    if not inst:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "No active deployment", "channels": [], "count": 0},
+        )
+    result = inst.chaos_controller.adopt_all_active_sessions(session_id)
+    if result.get("error"):
+        return JSONResponse(status_code=400, content=result)
+    if inst.dashboard_ws:
+        await inst.dashboard_ws.broadcast_status(inst.chaos_controller, inst.service_manager)
+    return result
+
+
 # ── Status API ──────────────────────────────────────────────────────────────
 
 @app.get("/api/status")

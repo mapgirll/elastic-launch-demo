@@ -74,9 +74,8 @@ steps:
 
   - name: run_rca
     type: ai.agent
-    agent-id: __AGENT_ID__
-    create-conversation: true
     with:
+      agent-id: __AGENT_ID__
       message: >
         Significant event detected: {{ event.rule.name }}.
         Error type: {{ event.rule.tags[1] }}.
@@ -92,7 +91,7 @@ steps:
       description: |
         [View Full Conversation](__KIBANA_ORIGIN__/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }})
 
-        {{ steps.run_rca.output.message }}
+        {{ steps.run_rca.output }}
       tags:
         - "__NS__"
         - "{{ event.rule.tags[1] }}"

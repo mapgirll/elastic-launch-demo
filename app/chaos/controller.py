@@ -271,6 +271,39 @@ class ChaosController:
                 if ch["state"] == ACTIVE and ch["session_id"] == session_id
             ]
 
+    def adopt_all_active_sessions(self, session_id: str) -> dict[str, Any]:
+        """Reassign every ACTIVE channel to this session_id (SQLite + memory).
+
+        After an app restart, faults are restored from the store with the old
+        browser ``session_id``. The chaos UI calls this with the current tab's
+        id so the operator can resolve them without manual DB edits.
+        """
+        sid = (session_id or "").strip()
+        if not sid:
+            return {"error": "session_id required", "channels": [], "count": 0}
+        adopted: list[int] = []
+        with self._lock:
+            self._expire_stale()
+            for ch_id, ch in self._channels.items():
+                if ch["state"] != ACTIVE:
+                    continue
+                ch["session_id"] = sid
+                adopted.append(ch_id)
+                if self._store and self._deployment_id:
+                    self._store.upsert_channel(
+                        self._deployment_id,
+                        ch_id,
+                        state=ACTIVE,
+                        mode=ch["mode"],
+                        se_name=ch["se_name"] or "",
+                        session_id=sid,
+                        triggered_at=ch["triggered_at"],
+                        resolved_at=ch["resolved_at"],
+                        callback_url=ch.get("callback_url", ""),
+                        user_email=ch.get("user_email", ""),
+                    )
+        return {"status": "ok", "channels": adopted, "count": len(adopted)}
+
     def get_active_channels(self) -> list[int]:
         with self._lock:
             return [ch_id for ch_id, ch in self._channels.items() if ch["state"] == ACTIVE]

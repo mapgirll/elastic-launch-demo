@@ -14,7 +14,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import (
-    ACTIVE_SCENARIO, APP_HOST, APP_PORT, CHANNEL_REGISTRY,
+    ACTIVE_SCENARIO, APP_HOST, APP_PORT, AUTO_DEPLOY_SCENARIO_IDS,
+    CHANNEL_REGISTRY,
     CREDENTIALS_LOCKED, DEMO_ELASTIC_API_KEY, DEMO_ELASTIC_URL,
     DEMO_KIBANA_URL, DEMO_OTLP_URL,
     MISSION_ID, MISSION_NAME, NAMESPACE, SERVICES,
@@ -219,6 +220,17 @@ async def lifespan(app: FastAPI):
                 "Demo credentials locked: Kibana/ES API key read only from server environment."
             )
 
+    if AUTO_DEPLOY_SCENARIO_IDS:
+        logger.info(
+            "AUTO_DEPLOY_SCENARIOS enabled: %s (sequential background deploy)",
+            ", ".join(AUTO_DEPLOY_SCENARIO_IDS),
+        )
+        threading.Thread(
+            target=_auto_deploy_sequential_worker,
+            daemon=True,
+            name="auto-deploy-scenarios",
+        ).start()
+
     yield
 
     registry.stop_all()
@@ -351,6 +363,110 @@ def _server_elastic_credentials(body: dict | None) -> tuple[str, str, str, str] 
     if not kibana_url or not api_key:
         return None
     return kibana_url, api_key, elastic_url, explicit_otlp
+
+
+def _execute_scenario_deploy(scenario_id: str, body: dict | None = None) -> bool:
+    """Run ScenarioDeployer.deploy_all, then start ScenarioInstance and persist store.
+
+    Same work as the background thread for ``POST /api/setup/launch``. Returns False
+    if credentials are missing, scenario is unknown, or deploy/instance fails.
+    """
+    body = body or {}
+    from scenarios import get_scenario as _get_scenario_by_id
+    from elastic_config.deployer import ScenarioDeployer
+    from app.context import ScenarioContext
+    from app.instance import ScenarioInstance
+
+    resolved = _server_elastic_credentials(body)
+    if not resolved:
+        logger.error("Deploy skipped (no Kibana/API key): scenario=%s", scenario_id)
+        return False
+    kibana_url, api_key, elastic_url, explicit_otlp = resolved
+    if not elastic_url:
+        logger.error("Deploy skipped (no Elasticsearch URL): scenario=%s", scenario_id)
+        return False
+    try:
+        scenario = _get_scenario_by_id(scenario_id)
+    except Exception:
+        logger.exception("Deploy skipped (unknown scenario): %s", scenario_id)
+        return False
+
+    deployer = ScenarioDeployer(scenario, elastic_url, kibana_url, api_key)
+    deployment_id = scenario_id
+
+    def _progress_cb(progress):
+        _deploy_progress[deployment_id] = progress.to_dict()
+
+    old_inst = registry.get(deployment_id)
+    if old_inst:
+        try:
+            old_inst.stop()
+            logger.info("Stopped existing instance %s before deploy", deployment_id)
+        except Exception as exc:
+            logger.warning("Error stopping old instance: %s", exc)
+
+    try:
+        result = deployer.deploy_all(callback=_progress_cb)
+    except Exception:
+        logger.exception("deploy_all failed: scenario=%s", scenario_id)
+        return False
+
+    otlp_endpoint = explicit_otlp or result.otlp_endpoint
+
+    try:
+        ctx = ScenarioContext.from_scenario(
+            scenario,
+            otlp_endpoint=otlp_endpoint or "",
+            otlp_api_key=api_key,
+            elastic_url=elastic_url,
+            elastic_api_key=api_key,
+            kibana_url=kibana_url,
+        )
+        instance = ScenarioInstance(ctx, chaos_store=chaos_store)
+
+        if otlp_endpoint:
+            instance.otlp.reconfigure(
+                otlp_endpoint,
+                api_key,
+                scope_name=scenario.otlp_scope_name,
+            )
+            logger.info("OTLPClient for %s reconfigured to %s", scenario_id, otlp_endpoint)
+
+        instance.start()
+        registry.register(deployment_id, instance)
+
+        store.upsert(
+            deployment_id=deployment_id,
+            scenario_id=scenario_id,
+            otlp_endpoint=otlp_endpoint or "",
+            otlp_api_key=api_key,
+            elastic_url=elastic_url,
+            elastic_api_key=api_key,
+            kibana_url=kibana_url,
+        )
+
+        logger.info("Deployment %s (%s) live", deployment_id, scenario_id)
+    except Exception:
+        logger.exception("Failed to start instance for %s", scenario_id)
+        return False
+    return True
+
+
+def _auto_deploy_sequential_worker() -> None:
+    """Background: deploy each configured scenario_id one after another."""
+    for scenario_id in AUTO_DEPLOY_SCENARIO_IDS:
+        logger.info("AUTO_DEPLOY_SCENARIOS: starting %s", scenario_id)
+        _deploy_progress[scenario_id] = {"finished": False, "error": "", "steps": []}
+        ok = _execute_scenario_deploy(scenario_id, {})
+        logger.info(
+            "AUTO_DEPLOY_SCENARIOS: %s %s",
+            scenario_id,
+            "ok" if ok else "failed (see logs)",
+        )
+    logger.info(
+        "AUTO_DEPLOY_SCENARIOS finished (%d scenario(s))",
+        len(AUTO_DEPLOY_SCENARIO_IDS),
+    )
 
 
 # ── Scenario Selector (new front page) ───────────────────────────────────────
@@ -888,12 +1004,7 @@ async def launch_setup(body: dict):
     Runs in a background thread. After deployment, creates a ScenarioInstance
     and registers it in the registry + SQLite store.
     """
-    import threading
-
     from scenarios import get_scenario as _get_scenario_by_id
-    from elastic_config.deployer import ScenarioDeployer
-    from app.context import ScenarioContext
-    from app.instance import ScenarioInstance
 
     scenario_id = body.get("scenario_id", ACTIVE_SCENARIO)
     resolved = _server_elastic_credentials(body)
@@ -906,7 +1017,7 @@ async def launch_setup(body: dict):
         )
         return JSONResponse(status_code=400, content={"error": err})
 
-    kibana_url, api_key, elastic_url, explicit_otlp = resolved
+    _kibana_url, _api_key, elastic_url, _explicit_otlp = resolved
 
     if not elastic_url:
         return JSONResponse(
@@ -919,71 +1030,21 @@ async def launch_setup(body: dict):
             },
         )
 
-    scenario = _get_scenario_by_id(scenario_id)
-    deployer = ScenarioDeployer(scenario, elastic_url, kibana_url, api_key)
+    try:
+        _get_scenario_by_id(scenario_id)
+    except Exception:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Unknown scenario_id: {scenario_id}"},
+        )
 
-    # Use scenario_id as deployment_id
     deployment_id = scenario_id
-
-    def _progress_cb(progress):
-        _deploy_progress[deployment_id] = progress.to_dict()
-
-    def _run():
-        # Stop existing instance for this scenario if running
-        old_inst = registry.get(deployment_id)
-        if old_inst:
-            try:
-                old_inst.stop()
-                logger.info("Stopped existing instance %s before redeploy", deployment_id)
-            except Exception as exc:
-                logger.warning("Error stopping old instance: %s", exc)
-
-        result = deployer.deploy_all(callback=_progress_cb)
-
-        # Use explicit OTLP override if provided, otherwise use derived
-        otlp_endpoint = explicit_otlp or result.otlp_endpoint
-
-        # Create ScenarioContext + ScenarioInstance
-        try:
-            ctx = ScenarioContext.from_scenario(
-                scenario,
-                otlp_endpoint=otlp_endpoint or "",
-                otlp_api_key=api_key,
-                elastic_url=elastic_url,
-                elastic_api_key=api_key,
-                kibana_url=kibana_url,
-            )
-            instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-
-            # Reconfigure OTLP if we have an endpoint
-            if otlp_endpoint:
-                instance.otlp.reconfigure(
-                    otlp_endpoint,
-                    api_key,
-                    scope_name=scenario.otlp_scope_name,
-                )
-                logger.info("OTLPClient for %s reconfigured to %s", scenario_id, otlp_endpoint)
-
-            instance.start()
-            registry.register(deployment_id, instance)
-
-            # Persist to SQLite
-            store.upsert(
-                deployment_id=deployment_id,
-                scenario_id=scenario_id,
-                otlp_endpoint=otlp_endpoint or "",
-                otlp_api_key=api_key,
-                elastic_url=elastic_url,
-                elastic_api_key=api_key,
-                kibana_url=kibana_url,
-            )
-
-            logger.info("Deployment %s (%s) live", deployment_id, scenario_id)
-        except Exception as exc:
-            logger.exception("Failed to start instance for %s: %s", scenario_id, exc)
-
     _deploy_progress[deployment_id] = {"finished": False, "error": "", "steps": []}
-    thread = threading.Thread(target=_run, daemon=True)
+    thread = threading.Thread(
+        target=lambda: _execute_scenario_deploy(scenario_id, body),
+        daemon=True,
+        name=f"deploy-{scenario_id}",
+    )
     thread.start()
 
     return {"status": "started", "scenario": scenario_id, "deployment_id": deployment_id}

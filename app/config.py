@@ -43,6 +43,16 @@ DEMO_ELASTIC_API_KEY = os.getenv("DEMO_ELASTIC_API_KEY", "").strip()
 DEMO_ELASTIC_URL = os.getenv("DEMO_ELASTIC_URL", "").strip().rstrip("/")
 DEMO_OTLP_URL = os.getenv("DEMO_OTLP_URL", "").strip().rstrip("/")
 
+# ── Auto-deploy on startup (systemd / uvicorn restart) ───────────────────────
+# Comma-separated scenario_id values. Each runs a full Elastic deploy + telemetry
+# instance, sequentially (avoids API races). Example: gcp,financial,banking
+# Set to empty or "0" to disable.
+_auto_raw = os.getenv("AUTO_DEPLOY_SCENARIOS", "").strip()
+if _auto_raw.lower() in ("0", "false", "none", "off", "no"):
+    AUTO_DEPLOY_SCENARIO_IDS: list[str] = []
+else:
+    AUTO_DEPLOY_SCENARIO_IDS = [x.strip() for x in _auto_raw.split(",") if x.strip()]
+
 # ── Active Scenario ───────────────────────────────────────────────────────
 ACTIVE_SCENARIO = os.getenv("ACTIVE_SCENARIO", "space")
 

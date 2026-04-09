@@ -27,11 +27,11 @@ steps:
         | STATS total_errors = COUNT(*)
       format: json
 
-  - name: parse_event_meta
-    type: data.set
-    with:
-      var:
-        - event_meta: "${{ steps.enrich_context.output.values[0][0] | json_parse }}"
+#  - name: parse_event_meta
+#    type: data.set
+#    with:
+#      var:
+#        - event_meta: "${{ steps.enrich_context.output.values[0][0] | json_parse }}"
 
   # Wrap email in `if` so Kibana never validates an empty `to:`; use `.0.` paths
   # (not `[0]`) for conditions per workflow KQL rules (AGENTS.MD).
@@ -46,6 +46,21 @@ steps:
           to:
             - "{{ steps.parse_event_meta.output.var.0.event_meta.user_email }}"
           subject: "__SCENARIO_NAME__ Alert: {{ event.rule.name }}"
+          message: >
+            Significant event detected in __SCENARIO_NAME__ mission:
+
+            Rule: {{ event.rule.name }}
+            Error Type: {{ event.rule.tags[1] }}
+            Total errors (15m): {{ steps.count_errors.output.values[0][0] }}
+
+            An AI root cause analysis is underway — a case with detailed findings will be created shortly.
+
+            Open Kibana to investigate and request remediation.
+
+    else:
+      - name: log_notification_no_recipient_email
+        type: console
+        with:
           message: >
             Significant event detected in __SCENARIO_NAME__ mission:
 

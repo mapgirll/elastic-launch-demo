@@ -109,6 +109,9 @@ def _workflow_item_name(item: dict[str, Any]) -> str:
         lambda d: (d.get("attributes") or {}).get("name")
         if isinstance(d.get("attributes"), dict)
         else None,
+        lambda d: (d.get("attributes") or {}).get("title")
+        if isinstance(d.get("attributes"), dict)
+        else None,
         lambda d: (d.get("workflow") or {}).get("name")
         if isinstance(d.get("workflow"), dict)
         else None,
@@ -123,27 +126,191 @@ def _workflow_item_name(item: dict[str, Any]) -> str:
     return ""
 
 
-def _parse_workflow_create_response(wf_data: Any) -> str:
-    """Parse workflow id from ``POST /api/workflows`` response body."""
+def _workflow_create_response_ids(wf_data: Any) -> list[str]:
+    """All plausible workflow ids from a create response, best-first order.
+
+    Some stacks return a top-level ``id`` that is not the workflow document the UI
+    lists (leading to an ``Untitled`` row and broken alert links). Prefer nested
+    ``workflow.id`` when present.
+    """
     if not isinstance(wf_data, dict):
-        return ""
-    candidates: list[Any] = [wf_data.get("id"), wf_data.get("workflowId")]
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(v: Any) -> None:
+        if isinstance(v, str):
+            s = v.strip()
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+
     nested = wf_data.get("workflow")
     if isinstance(nested, dict):
-        candidates.append(nested.get("id"))
+        add(nested.get("id"))
+        add(nested.get("workflowId"))
+    add(wf_data.get("id"))
+    add(wf_data.get("workflowId"))
     item = wf_data.get("item")
     if isinstance(item, dict):
-        candidates.append(item.get("id"))
+        add(item.get("id"))
+        add(item.get("workflowId"))
     data = wf_data.get("data")
     if isinstance(data, dict):
-        candidates.append(data.get("id"))
+        add(data.get("id"))
+        add(data.get("workflowId"))
     attrs = wf_data.get("attributes")
     if isinstance(attrs, dict):
-        candidates.append(attrs.get("workflowId"))
-        candidates.append(attrs.get("id"))
-    for v in candidates:
-        if isinstance(v, str) and v.strip():
-            return v.strip()
+        add(attrs.get("workflowId"))
+        add(attrs.get("id"))
+    return out
+
+
+def _expected_workflow_title_from_yaml(yaml_content: str) -> str:
+    """Parse ``name:`` from workflow YAML (first mapping key, single-line value)."""
+    for raw_line in yaml_content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("name:"):
+            val = line[5:].strip()
+            if not val:
+                return ""
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                return val[1:-1]
+            return val
+    return ""
+
+
+def _workflow_title_matches_resolved(title: str, expected_from_yaml: str) -> bool:
+    def norm(s: str) -> str:
+        return " ".join((s or "").split())
+
+    t = norm(title)
+    if not t or t.lower() == "untitled":
+        return False
+    e = norm(expected_from_yaml)
+    if not e:
+        return True
+    return t == e
+
+
+def _workflow_get_json(
+    client: httpx.Client, kibana_url: str, api_key: str, wf_id: str
+) -> dict[str, Any] | None:
+    if not wf_id.strip():
+        return None
+    r = client.get(
+        f"{kibana_url}/api/workflows/{wf_id.strip()}",
+        headers=_kibana_headers(api_key),
+    )
+    if r.status_code >= 300:
+        return None
+    try:
+        data = r.json()
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _workflow_display_from_get(data: dict[str, Any]) -> str:
+    item = data.get("item")
+    if isinstance(item, dict):
+        inner = _workflow_display_from_get(item)
+        if inner:
+            return inner
+    n = _workflow_item_name(data)
+    if n:
+        return n
+    y = data.get("yaml")
+    if isinstance(y, str) and y.strip():
+        return _expected_workflow_title_from_yaml(y)
+    w = data.get("workflow")
+    if isinstance(w, dict):
+        return _workflow_display_from_get(w)
+    return ""
+
+
+def _pick_verified_workflow_id(
+    client: httpx.Client,
+    kibana_url: str,
+    api_key: str,
+    candidate_ids: list[str],
+    expected_title: str,
+) -> str:
+    """Return the first id whose GET title matches ``expected_title``."""
+    for wid in candidate_ids:
+        doc = _workflow_get_json(client, kibana_url, api_key, wid)
+        got = _workflow_display_from_get(doc or {})
+        if _workflow_title_matches_resolved(got, expected_title):
+            return wid
+    return ""
+
+
+def _resolve_workflow_id_after_post(
+    client: httpx.Client,
+    kibana_url: str,
+    api_key: str,
+    create_body: Any,
+    yaml_content: str,
+    template_key: str,
+) -> str:
+    """Pick the workflow id whose GET title matches this YAML, else PUT then retry."""
+    expected = _expected_workflow_title_from_yaml(yaml_content)
+    candidates = _workflow_create_response_ids(create_body)
+    if not candidates:
+        logger.warning(
+            "Workflow %s: create response had no id candidates (prefix %s)",
+            template_key,
+            (json.dumps(create_body) if isinstance(create_body, dict) else str(create_body))[
+                :400
+            ],
+        )
+        return ""
+
+    def title_ok(title: str) -> bool:
+        return _workflow_title_matches_resolved(title, expected)
+
+    for wid in candidates:
+        doc = _workflow_get_json(client, kibana_url, api_key, wid)
+        if doc is None:
+            continue
+        display = _workflow_display_from_get(doc)
+        if title_ok(display):
+            if wid != candidates[0]:
+                logger.info(
+                    "Workflow %s: using id %s (verified title); create listed %s first",
+                    template_key,
+                    wid,
+                    candidates[0],
+                )
+            return wid
+
+    wid0 = candidates[0]
+    put_r = client.put(
+        f"{kibana_url}/api/workflows/{wid0}",
+        headers=_kibana_headers(api_key),
+        json={"yaml": yaml_content},
+    )
+    if put_r.status_code < 300:
+        doc = _workflow_get_json(client, kibana_url, api_key, wid0)
+        if doc is not None:
+            display = _workflow_display_from_get(doc)
+            if title_ok(display):
+                logger.info(
+                    "Workflow %s: PUT applied YAML; verified id=%s", template_key, wid0
+                )
+                return wid0
+
+    last_doc = _workflow_get_json(client, kibana_url, api_key, wid0)
+    last_title = _workflow_display_from_get(last_doc or {})
+    logger.warning(
+        "Workflow %s: could not match expected title %r (candidates=%s, last_title=%r)",
+        template_key,
+        expected,
+        candidates,
+        last_title,
+    )
     return ""
 
 
@@ -810,12 +977,20 @@ class ScenarioDeployer:
             )
             if resp.status_code < 300:
                 try:
-                    wf_id = _parse_workflow_create_response(resp.json())
+                    create_body = resp.json()
+                    wf_id = _resolve_workflow_id_after_post(
+                        client,
+                        self.kibana_url,
+                        self.api_key,
+                        create_body,
+                        yaml_content,
+                        name,
+                    )
                     if wf_id:
                         self._workflow_ids[name] = wf_id
                     else:
                         logger.warning(
-                            "Workflow %s: create response had no id (body prefix %s)",
+                            "Workflow %s: no verified id after POST/PUT (prefix %s)",
                             name,
                             (resp.text or "")[:300],
                         )
@@ -1658,17 +1833,32 @@ When the user asks you to fix or remediate this issue, use `{t_remediate}` with 
         alert rules to unrelated or ``Untitled`` workflows.
         """
         tpl_key = "significant_event_notification"
+        expected_name = f"{self.scenario.scenario_name} Significant Event Notification"
         wf_id = (self._workflow_ids.get(tpl_key) or "").strip()
         if wf_id:
-            return wf_id
+            doc = _workflow_get_json(client, self.kibana_url, self.api_key, wf_id)
+            got = _workflow_display_from_get(doc or {})
+            if _workflow_title_matches_resolved(got, expected_name):
+                return wf_id
+            logger.warning(
+                "Stored notification workflow id %r title is %r (expected %r); "
+                "resolving via search",
+                wf_id,
+                got,
+                expected_name,
+            )
+            wf_id = ""
         for name_frag, wid in self._workflow_ids.items():
             if not wid:
                 continue
             if name_frag == tpl_key or (
                 "significant_event" in name_frag and "notification" in name_frag
             ):
-                return wid.strip()
-        expected_name = f"{self.scenario.scenario_name} Significant Event Notification"
+                w = wid.strip()
+                doc = _workflow_get_json(client, self.kibana_url, self.api_key, w)
+                got = _workflow_display_from_get(doc or {})
+                if _workflow_title_matches_resolved(got, expected_name):
+                    return w
         resp = client.post(
             f"{self.kibana_url}/api/workflows/search",
             headers=_kibana_headers(self.api_key),
@@ -1693,25 +1883,31 @@ When the user asks you to fix or remediate this issue, use `{t_remediate}` with 
                 exact.append(wid)
             elif suffix in name and sn in name:
                 fuzzy.append(wid)
-        if len(exact) == 1:
-            return exact[0]
-        if len(exact) > 1:
-            logger.warning(
-                "Multiple workflows named %r; using first id %s",
-                expected_name,
-                exact[0],
+        if exact:
+            verified = _pick_verified_workflow_id(
+                client, self.kibana_url, self.api_key, exact, expected_name
             )
-            return exact[0]
-        if len(fuzzy) == 1:
-            return fuzzy[0]
-        if len(fuzzy) > 1:
-            logger.warning(
-                "Multiple %r workflows for scenario %r; using first id %s",
-                suffix,
-                sn,
-                fuzzy[0],
+            if verified:
+                if len(exact) > 1:
+                    logger.warning(
+                        "Multiple workflows named %r in search; using verified id %s",
+                        expected_name,
+                        verified,
+                    )
+                return verified
+        if fuzzy:
+            verified = _pick_verified_workflow_id(
+                client, self.kibana_url, self.api_key, fuzzy, expected_name
             )
-            return fuzzy[0]
+            if verified:
+                if len(fuzzy) > 1:
+                    logger.warning(
+                        "Multiple fuzzy %r matches for scenario %r; using verified id %s",
+                        suffix,
+                        sn,
+                        verified,
+                    )
+                return verified
         return ""
 
     def _deploy_alerting(self, client: httpx.Client, notify: ProgressCallback):

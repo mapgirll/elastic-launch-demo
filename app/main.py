@@ -365,11 +365,38 @@ def _server_elastic_credentials(body: dict | None) -> tuple[str, str, str, str] 
     return kibana_url, api_key, elastic_url, explicit_otlp
 
 
-def _execute_scenario_deploy(scenario_id: str, body: dict | None = None) -> bool:
-    """Run ScenarioDeployer.deploy_all, then start ScenarioInstance and persist store.
+def _derive_otlp_for_instance(kibana_url: str, elastic_url: str, explicit_otlp: str) -> str:
+    """OTLP ingest URL so telemetry can start before ``deploy_all`` finishes.
 
-    Same work as the background thread for ``POST /api/setup/launch``. Returns False
-    if credentials are missing, scenario is unknown, or deploy/instance fails.
+    Matches deployer/bootstrap behavior: explicit env/body, then ``.es.``→``.ingest.``,
+    else Kibana ``.kb.``→``.ingest.`` with ``:443``.
+    """
+    e = (explicit_otlp or "").strip().rstrip("/")
+    if e:
+        return e
+    eu = (elastic_url or "").strip().rstrip("/")
+    if eu and ".es." in eu:
+        endpoint = eu.replace(".es.", ".ingest.").rstrip("/")
+        if not endpoint.endswith(":443"):
+            endpoint += ":443"
+        return endpoint
+    ku = (kibana_url or "").strip().rstrip("/")
+    if ku and ".kb." in ku:
+        endpoint = ku.replace(".kb.", ".ingest.").rstrip("/")
+        if not endpoint.endswith(":443"):
+            endpoint += ":443"
+        return endpoint
+    return ""
+
+
+def _execute_scenario_deploy(scenario_id: str, body: dict | None = None) -> bool:
+    """Start ScenarioInstance (telemetry) first, then run Elastic/Kibana ``deploy_all``.
+
+    OTLP is derived up front so generators can ship data while Kibana objects are
+    still being created. If ``deploy_all`` reports an error, returns False but the
+    instance keeps running unless startup failed.
+
+    Same work as the background thread for ``POST /api/setup/launch``.
     """
     body = body or {}
     from scenarios import get_scenario as _get_scenario_by_id
@@ -401,22 +428,17 @@ def _execute_scenario_deploy(scenario_id: str, body: dict | None = None) -> bool
     if old_inst:
         try:
             old_inst.stop()
-            logger.info("Stopped existing instance %s before deploy", deployment_id)
+            logger.info("Stopped existing instance %s before redeploy", deployment_id)
         except Exception as exc:
             logger.warning("Error stopping old instance: %s", exc)
 
-    try:
-        result = deployer.deploy_all(callback=_progress_cb)
-    except Exception:
-        logger.exception("deploy_all failed: scenario=%s", scenario_id)
-        return False
-
-    otlp_endpoint = explicit_otlp or result.otlp_endpoint
+    explicit_s = (explicit_otlp or "").strip().rstrip("/")
+    otlp_now = _derive_otlp_for_instance(kibana_url, elastic_url, explicit_s)
 
     try:
         ctx = ScenarioContext.from_scenario(
             scenario,
-            otlp_endpoint=otlp_endpoint or "",
+            otlp_endpoint=otlp_now or "",
             otlp_api_key=api_key,
             elastic_url=elastic_url,
             elastic_api_key=api_key,
@@ -424,13 +446,13 @@ def _execute_scenario_deploy(scenario_id: str, body: dict | None = None) -> bool
         )
         instance = ScenarioInstance(ctx, chaos_store=chaos_store)
 
-        if otlp_endpoint:
+        if otlp_now:
             instance.otlp.reconfigure(
-                otlp_endpoint,
+                otlp_now,
                 api_key,
                 scope_name=scenario.otlp_scope_name,
             )
-            logger.info("OTLPClient for %s reconfigured to %s", scenario_id, otlp_endpoint)
+            logger.info("OTLPClient for %s → %s (pre-deploy)", scenario_id, otlp_now)
 
         instance.start()
         registry.register(deployment_id, instance)
@@ -438,17 +460,56 @@ def _execute_scenario_deploy(scenario_id: str, body: dict | None = None) -> bool
         store.upsert(
             deployment_id=deployment_id,
             scenario_id=scenario_id,
-            otlp_endpoint=otlp_endpoint or "",
+            otlp_endpoint=otlp_now or "",
             otlp_api_key=api_key,
             elastic_url=elastic_url,
             elastic_api_key=api_key,
             kibana_url=kibana_url,
         )
 
-        logger.info("Deployment %s (%s) live", deployment_id, scenario_id)
+        logger.info(
+            "Telemetry live for %s — starting Elastic/Kibana deploy", deployment_id
+        )
     except Exception:
         logger.exception("Failed to start instance for %s", scenario_id)
         return False
+
+    try:
+        result = deployer.deploy_all(callback=_progress_cb)
+    except Exception:
+        logger.exception("deploy_all failed: scenario=%s", scenario_id)
+        return False
+
+    otlp_final = explicit_s or (getattr(result, "otlp_endpoint", None) or "").strip().rstrip("/") or otlp_now
+    if otlp_final and otlp_final != otlp_now:
+        try:
+            instance.otlp.reconfigure(
+                otlp_final,
+                api_key,
+                scope_name=scenario.otlp_scope_name,
+            )
+            store.upsert(
+                deployment_id=deployment_id,
+                scenario_id=scenario_id,
+                otlp_endpoint=otlp_final,
+                otlp_api_key=api_key,
+                elastic_url=elastic_url,
+                elastic_api_key=api_key,
+                kibana_url=kibana_url,
+            )
+            logger.info("OTLPClient for %s reconfigured after deploy → %s", scenario_id, otlp_final)
+        except Exception:
+            logger.exception("OTLP reconfigure after deploy failed for %s", scenario_id)
+
+    if getattr(result, "error", None):
+        logger.error(
+            "Elastic/Kibana deploy finished with error for %s: %s",
+            scenario_id,
+            result.error,
+        )
+        return False
+
+    logger.info("Deployment %s (%s) — Kibana/ES config complete", deployment_id, scenario_id)
     return True
 
 

@@ -213,6 +213,17 @@ def _workflow_get_json(
     return data if isinstance(data, dict) else None
 
 
+def _workflow_doc_is_runnable(doc: dict[str, Any]) -> bool:
+    """True if Kibana compiled the workflow and it is not soft-deleted."""
+    if not doc:
+        return False
+    if doc.get("deleted_at"):
+        return False
+    if doc.get("valid") is False:
+        return False
+    return True
+
+
 def _workflow_display_from_get(data: dict[str, Any]) -> str:
     item = data.get("item")
     if isinstance(item, dict):
@@ -242,7 +253,9 @@ def _pick_verified_workflow_id(
     for wid in candidate_ids:
         doc = _workflow_get_json(client, kibana_url, api_key, wid)
         got = _workflow_display_from_get(doc or {})
-        if _workflow_title_matches_resolved(got, expected_title):
+        if _workflow_title_matches_resolved(got, expected_title) and _workflow_doc_is_runnable(
+            doc or {}
+        ):
             return wid
     return ""
 
@@ -276,7 +289,7 @@ def _resolve_workflow_id_after_post(
         if doc is None:
             continue
         display = _workflow_display_from_get(doc)
-        if title_ok(display):
+        if title_ok(display) and _workflow_doc_is_runnable(doc):
             if wid != candidates[0]:
                 logger.info(
                     "Workflow %s: using id %s (verified title); create listed %s first",
@@ -296,20 +309,24 @@ def _resolve_workflow_id_after_post(
         doc = _workflow_get_json(client, kibana_url, api_key, wid0)
         if doc is not None:
             display = _workflow_display_from_get(doc)
-            if title_ok(display):
+            if title_ok(display) and _workflow_doc_is_runnable(doc):
                 logger.info(
                     "Workflow %s: PUT applied YAML; verified id=%s", template_key, wid0
                 )
                 return wid0
 
-    last_doc = _workflow_get_json(client, kibana_url, api_key, wid0)
-    last_title = _workflow_display_from_get(last_doc or {})
+    last_doc = _workflow_get_json(client, kibana_url, api_key, wid0) or {}
+    last_title = _workflow_display_from_get(last_doc)
     logger.warning(
-        "Workflow %s: could not match expected title %r (candidates=%s, last_title=%r)",
+        "Workflow %s: could not verify runnable workflow title=%r expected=%r "
+        "candidates=%s valid=%s deleted_at=%s (PUT status=%s)",
         template_key,
+        last_title,
         expected,
         candidates,
-        last_title,
+        last_doc.get("valid"),
+        last_doc.get("deleted_at"),
+        put_r.status_code,
     )
     return ""
 
@@ -362,6 +379,16 @@ def _kibana_headers(api_key: str) -> dict[str, str]:
         "x-elastic-internal-origin": "kibana",
         "Authorization": f"ApiKey {api_key}",
     }
+
+
+def _kibana_origin_for_workflow_links(kibana_url: str) -> str:
+    """Public origin (no trailing slash) embedded into workflow YAML links.
+
+    ``{{ kibanaUrl }}`` is not reliably defined at workflow validation time and
+    can make the whole definition invalid (``valid: false``, ``definition: null``,
+    UI shows "Untitled workflow").
+    """
+    return kibana_url.strip().rstrip("/")
 
 
 def _es_headers(api_key: str) -> dict[str, str]:
@@ -1027,6 +1054,10 @@ class ScenarioDeployer:
                 yaml_content = yaml_content.replace("__SCENARIO_NAME__", scenario_name)
                 yaml_content = yaml_content.replace("__AGENT_ID__", agent_id)
                 yaml_content = yaml_content.replace("__NS__", ns)
+                yaml_content = yaml_content.replace(
+                    "__KIBANA_ORIGIN__",
+                    _kibana_origin_for_workflow_links(self.kibana_url),
+                )
                 key = fname.replace(".yaml", "")
                 workflows[key] = yaml_content
         else:
@@ -1074,7 +1105,7 @@ steps:
     with:
       title: "{scenario_name} RCA: {{{{ event.rule.name }}}}"
       description: |
-        [View Conversation]({{{{ kibanaUrl }}}}/app/agent_builder/conversations/{{{{ steps.run_rca.output.conversation_id }}}})
+        [View Conversation]({_kibana_origin_for_workflow_links(self.kibana_url)}/app/agent_builder/conversations/{{{{ steps.run_rca.output.conversation_id }}}})
 
         {{{{ steps.run_rca.output.message }}}}
       tags:
@@ -1838,7 +1869,9 @@ When the user asks you to fix or remediate this issue, use `{t_remediate}` with 
         if wf_id:
             doc = _workflow_get_json(client, self.kibana_url, self.api_key, wf_id)
             got = _workflow_display_from_get(doc or {})
-            if _workflow_title_matches_resolved(got, expected_name):
+            if _workflow_title_matches_resolved(got, expected_name) and _workflow_doc_is_runnable(
+                doc or {}
+            ):
                 return wf_id
             logger.warning(
                 "Stored notification workflow id %r title is %r (expected %r); "
@@ -1857,7 +1890,9 @@ When the user asks you to fix or remediate this issue, use `{t_remediate}` with 
                 w = wid.strip()
                 doc = _workflow_get_json(client, self.kibana_url, self.api_key, w)
                 got = _workflow_display_from_get(doc or {})
-                if _workflow_title_matches_resolved(got, expected_name):
+                if _workflow_title_matches_resolved(got, expected_name) and _workflow_doc_is_runnable(
+                    doc or {}
+                ):
                     return w
         resp = client.post(
             f"{self.kibana_url}/api/workflows/search",

@@ -31,25 +31,31 @@ steps:
     type: data.set
     with:
       var:
-        - event_meta: "${{ steps.enrich_context.output.values[1][0] | json_parse }}"
+        - event_meta: "${{ steps.enrich_context.output.values[0][0] | json_parse }}"
 
-  - name: send_notification
-    type: email
-    connector-id: Elastic-Cloud-SMTP
-    with:
-      to:
-        - "{{ steps.parse_event_meta.output.var[0].event_meta.user_email }}"
-      subject: "__SCENARIO_NAME__ Alert: {{ event.rule.name }}"
-      message: >
-        Significant event detected in __SCENARIO_NAME__ mission:
+  # Wrap email in `if` so Kibana never validates an empty `to:`; use `.0.` paths
+  # (not `[0]`) for conditions per workflow KQL rules (AGENTS.MD).
+  - name: send_email_if_known_recipient
+    type: if
+    condition: "steps.parse_event_meta.output.var.0.event_meta.user_email : *@*"
+    steps:
+      - name: send_notification
+        type: email
+        connector-id: Elastic-Cloud-SMTP
+        with:
+          to:
+            - "{{ steps.parse_event_meta.output.var.0.event_meta.user_email }}"
+          subject: "__SCENARIO_NAME__ Alert: {{ event.rule.name }}"
+          message: >
+            Significant event detected in __SCENARIO_NAME__ mission:
 
-        Rule: {{ event.rule.name }}
-        Error Type: {{ event.rule.tags[1] }}
-        Total errors (15m): {{ steps.count_errors.output.values[0][0] }}
+            Rule: {{ event.rule.name }}
+            Error Type: {{ event.rule.tags[1] }}
+            Total errors (15m): {{ steps.count_errors.output.values[0][0] }}
 
-        An AI root cause analysis is underway — a case with detailed findings will be created shortly.
+            An AI root cause analysis is underway — a case with detailed findings will be created shortly.
 
-        Open Kibana to investigate and request remediation.
+            Open Kibana to investigate and request remediation.
 
   - name: run_rca
     type: ai.agent
@@ -69,9 +75,9 @@ steps:
     with:
       title: "__SCENARIO_NAME__ RCA: {{ event.rule.name }}"
       description: |
-       [View Full Conversation]({{ kibanaUrl }}/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }})
+        [View Full Conversation](__KIBANA_ORIGIN__/app/agent_builder/conversations/{{ steps.run_rca.output.conversation_id }})
 
-       {{ steps.run_rca.output.message }}
+        {{ steps.run_rca.output.message }}
       tags:
         - "__NS__"
         - "{{ event.rule.tags[1] }}"

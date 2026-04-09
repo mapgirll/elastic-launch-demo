@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -46,6 +47,8 @@ def _purge_deployment_records(deployment_id: str) -> None:
 _deploy_progress: dict[str, dict] = {}
 _teardown_progress: dict[str, dict] = {}
 
+_instance_ensure_lock = threading.Lock()
+
 
 def _get_instance(deployment_id: Optional[str] = None):
     """Look up instance by id, or return first active instance as fallback."""
@@ -56,31 +59,153 @@ def _get_instance(deployment_id: Optional[str] = None):
     return registry.first()
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """On startup: restore active deployments from SQLite.  On shutdown: stop all."""
+def _restore_deployment_record(rec: dict) -> ScenarioInstance | None:
+    """Rehydrate one deployment from a SQLite row. Returns existing instance if already registered."""
     from app.context import ScenarioContext
     from app.instance import ScenarioInstance
     from scenarios import get_scenario
 
+    deployment_id = rec["deployment_id"]
+    existing = registry.get(deployment_id)
+    if existing:
+        return existing
+    try:
+        scenario = get_scenario(rec["scenario_id"])
+        ctx = ScenarioContext.from_scenario(
+            scenario,
+            otlp_endpoint=rec["otlp_endpoint"],
+            otlp_api_key=rec["otlp_api_key"],
+            elastic_url=rec["elastic_url"],
+            elastic_api_key=rec["elastic_api_key"],
+            kibana_url=rec["kibana_url"],
+        )
+        instance = ScenarioInstance(ctx, chaos_store=chaos_store)
+        instance.start()
+        registry.register(deployment_id, instance)
+        return instance
+    except Exception:
+        logger.exception("Failed to restore deployment %s", deployment_id)
+        return None
+
+
+def _sync_missing_instances_from_store() -> None:
+    """Register any active deployments that exist in SQLite but not in memory."""
+    for rec in store.get_all_active():
+        dep_id = rec["deployment_id"]
+        if registry.get(dep_id):
+            continue
+        _restore_deployment_record(dict(rec))
+
+
+def _bootstrap_instance_for_scenario(scenario_id: str) -> ScenarioInstance | None:
+    """Start a runtime instance from server credentials when SQLite has no usable row.
+
+    Uses the same convention as launch: ``deployment_id == scenario_id``.
+    Persists to SQLite so the next process restart can restore normally.
+    """
+    from app.context import ScenarioContext
+    from app.instance import ScenarioInstance
+    from scenarios import get_scenario
+
+    deployment_id = scenario_id
+    if registry.get(deployment_id):
+        return registry.get(deployment_id)
+    resolved = _server_elastic_credentials({})
+    if not resolved:
+        logger.warning(
+            "Chaos bootstrap skipped: no Kibana/API key (deploy once or set demo env vars)"
+        )
+        return None
+    kibana_url, api_key, elastic_url, explicit_otlp = resolved
+    if not elastic_url:
+        logger.warning("Chaos bootstrap skipped: no Elasticsearch URL")
+        return None
+    try:
+        scenario = get_scenario(scenario_id)
+    except Exception:
+        logger.exception("Chaos bootstrap: unknown scenario %s", scenario_id)
+        return None
+    otlp_endpoint = explicit_otlp or ""
+    if not otlp_endpoint and kibana_url and ".kb." in kibana_url:
+        otlp_endpoint = kibana_url.replace(".kb.", ".ingest.").rstrip("/")
+        if not otlp_endpoint.endswith(":443"):
+            otlp_endpoint += ":443"
+    try:
+        ctx = ScenarioContext.from_scenario(
+            scenario,
+            otlp_endpoint=otlp_endpoint or "",
+            otlp_api_key=api_key,
+            elastic_url=elastic_url,
+            elastic_api_key=api_key,
+            kibana_url=kibana_url,
+        )
+        instance = ScenarioInstance(ctx, chaos_store=chaos_store)
+        if otlp_endpoint:
+            instance.otlp.reconfigure(
+                otlp_endpoint,
+                api_key,
+                scope_name=scenario.otlp_scope_name,
+            )
+        instance.start()
+        registry.register(deployment_id, instance)
+        store.upsert(
+            deployment_id=deployment_id,
+            scenario_id=scenario.scenario_id,
+            otlp_endpoint=otlp_endpoint or "",
+            otlp_api_key=api_key,
+            elastic_url=elastic_url,
+            elastic_api_key=api_key,
+            kibana_url=kibana_url,
+        )
+        logger.info(
+            "Bootstrapped runtime for %s (chaos/API auto-heal after empty registry)",
+            deployment_id,
+        )
+        return instance
+    except Exception:
+        logger.exception("Chaos bootstrap failed for scenario %s", scenario_id)
+        return None
+
+
+def _ensure_instance(deployment_id: Optional[str] = None):
+    """Return a ScenarioInstance, restoring from SQLite or bootstrapping from env if needed.
+
+    Chaos and remediation endpoints use this so they keep working after uvicorn restarts
+    when Elastic is already configured and credentials are available on the server.
+    """
+    inst = _get_instance(deployment_id)
+    if inst:
+        return inst
+    with _instance_ensure_lock:
+        inst = _get_instance(deployment_id)
+        if inst:
+            return inst
+        _sync_missing_instances_from_store()
+        inst = _get_instance(deployment_id)
+        if inst:
+            return inst
+        d = (deployment_id or "").strip()
+        if d:
+            inst = _bootstrap_instance_for_scenario(d)
+            if inst:
+                return inst
+        recs = store.get_all_active()
+        if len(recs) == 1:
+            inst = _bootstrap_instance_for_scenario(recs[0]["deployment_id"])
+            if inst:
+                return inst
+        return _bootstrap_instance_for_scenario(ACTIVE_SCENARIO)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """On startup: restore active deployments from SQLite.  On shutdown: stop all."""
     # Restore previously active deployments
     for rec in store.get_all_active():
-        try:
-            scenario = get_scenario(rec["scenario_id"])
-            ctx = ScenarioContext.from_scenario(
-                scenario,
-                otlp_endpoint=rec["otlp_endpoint"],
-                otlp_api_key=rec["otlp_api_key"],
-                elastic_url=rec["elastic_url"],
-                elastic_api_key=rec["elastic_api_key"],
-                kibana_url=rec["kibana_url"],
-            )
-            instance = ScenarioInstance(ctx, chaos_store=chaos_store)
-            instance.start()
-            registry.register(rec["deployment_id"], instance)
+        inst = _restore_deployment_record(dict(rec))
+        if inst:
             logger.info("Restored deployment: %s (%s)", rec["deployment_id"], rec["scenario_id"])
-        except Exception:
-            logger.exception("Failed to restore deployment %s", rec["deployment_id"])
+        else:
             store.set_status(rec["deployment_id"], "error")
 
     if CREDENTIALS_LOCKED:
@@ -289,7 +414,7 @@ async def ws_dashboard(websocket: WebSocket):
     q = websocket.query_params
     dep_raw = q.get("deployment_id") or q.get("deploymentId") or ""
     dep_id = dep_raw.strip() or None
-    inst = _get_instance(dep_id)
+    inst = _ensure_instance(dep_id)
     if not inst:
         await websocket.close(code=1008, reason="no_active_deployment")
         return
@@ -416,7 +541,7 @@ async def remove_deployment(deployment_id: str):
 @app.post("/api/chaos/trigger")
 async def chaos_trigger(body: dict):
     deployment_id = body.get("deployment_id")
-    inst = _get_instance(deployment_id)
+    inst = _ensure_instance(deployment_id)
     if not inst:
         return JSONResponse(status_code=404, content={"error": "No active deployment"})
     channel = int(body.get("channel", 0))
@@ -436,7 +561,7 @@ async def chaos_trigger(body: dict):
 @app.post("/api/chaos/resolve")
 async def chaos_resolve(body: dict):
     deployment_id = body.get("deployment_id")
-    inst = _get_instance(deployment_id)
+    inst = _ensure_instance(deployment_id)
     if not inst:
         return JSONResponse(status_code=404, content={"error": "No active deployment"})
     channel = int(body.get("channel", 0))
@@ -452,7 +577,7 @@ async def chaos_resolve(body: dict):
 @app.post("/api/chaos/spikes")
 async def set_chaos_spikes(body: dict):
     deployment_id = body.get("deployment_id")
-    inst = _get_instance(deployment_id)
+    inst = _ensure_instance(deployment_id)
     if not inst:
         return JSONResponse(status_code=404, content={"error": "No active deployment"})
     inst.chaos_controller.set_infra_spikes(body)
@@ -461,7 +586,7 @@ async def set_chaos_spikes(body: dict):
 
 @app.get("/api/chaos/spikes")
 async def get_chaos_spikes(deployment_id: Optional[str] = None):
-    inst = _get_instance(deployment_id)
+    inst = _ensure_instance(deployment_id)
     if not inst:
         return {"cpu_pct": 0, "memory_pct": 0, "k8s_oom_intensity": 0, "latency_multiplier": 1.0}
     return inst.chaos_controller.get_infra_spikes()
@@ -469,7 +594,7 @@ async def get_chaos_spikes(deployment_id: Optional[str] = None):
 
 @app.get("/api/chaos/status")
 async def chaos_status(deployment_id: Optional[str] = None):
-    inst = _get_instance(deployment_id)
+    inst = _ensure_instance(deployment_id)
     if not inst:
         return {}
     return inst.chaos_controller.get_status()
@@ -477,7 +602,7 @@ async def chaos_status(deployment_id: Optional[str] = None):
 
 @app.get("/api/chaos/status/{channel}")
 async def chaos_channel_status(channel: int, deployment_id: Optional[str] = None):
-    inst = _get_instance(deployment_id)
+    inst = _ensure_instance(deployment_id)
     if not inst:
         return {"error": "No active deployment"}
     return inst.chaos_controller.get_channel_status(channel)
@@ -486,7 +611,7 @@ async def chaos_channel_status(channel: int, deployment_id: Optional[str] = None
 @app.get("/api/chaos/session/validate")
 async def chaos_session_validate(session_id: str, deployment_id: Optional[str] = None):
     """Check if a session_id owns any active channels."""
-    inst = _get_instance(deployment_id)
+    inst = _ensure_instance(deployment_id)
     if not inst:
         return {"valid": False, "channels": []}
     channels = inst.chaos_controller.validate_session(session_id)
@@ -503,7 +628,7 @@ async def chaos_session_adopt(body: dict):
             content={"error": "session_id required", "channels": [], "count": 0},
         )
     deployment_id = body.get("deployment_id")
-    inst = _get_instance(deployment_id)
+    inst = _ensure_instance(deployment_id)
     if not inst:
         return JSONResponse(
             status_code=404,
@@ -579,7 +704,7 @@ async def countdown_speed(body: dict):
 
 @app.post("/api/remediate/{channel}")
 async def remediate_channel(channel: int, deployment_id: Optional[str] = None):
-    inst = _get_instance(deployment_id)
+    inst = _ensure_instance(deployment_id)
     if not inst:
         return JSONResponse(status_code=404, content={"error": "No active deployment"})
     result = inst.chaos_controller.resolve(channel, force=True)
@@ -623,7 +748,7 @@ async def send_daily_update(body: dict):
     if not email:
         return JSONResponse(status_code=400, content={"error": "Missing email"})
 
-    inst = _get_instance(deployment_id)
+    inst = _ensure_instance(deployment_id)
     if not inst:
         return JSONResponse(status_code=404, content={"error": "No active deployment"})
 

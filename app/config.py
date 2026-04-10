@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Repo-root .env (not only cwd). Systemd/Uvicorn often start with a cwd where a
+# bare load_dotenv() would miss ./.env — breaks AUTO_DEPLOY_SCENARIOS etc.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env")
+load_dotenv()  # optional: cwd .env for local dev; does not override existing keys
 
 # ── Environment Configuration ──────────────────────────────────────────────
 OTLP_ENDPOINT = os.getenv("OTLP_ENDPOINT", "http://otel-collector:4318")

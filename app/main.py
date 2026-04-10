@@ -230,6 +230,13 @@ async def lifespan(app: FastAPI):
             daemon=True,
             name="auto-deploy-scenarios",
         ).start()
+    else:
+        logger.info(
+            "AUTO_DEPLOY_SCENARIOS is unset or empty — skipping startup multi-deploy. "
+            "Set environment variable AUTO_DEPLOY_SCENARIOS=gcp,financial,banking "
+            "(comma-separated scenario_id values), then restart the service. "
+            "Loaded from systemd EnvironmentFile, unit Environment=, or a .env in WorkingDirectory."
+        )
 
     yield
 

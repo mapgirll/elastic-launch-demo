@@ -8,6 +8,16 @@
 
 ---
 
+## AUTO_DEPLOY never runs
+
+Startup multi-deploy defaults to **`gcp`, `financial`, `banking`** in **`app/config.py`** (`_DEFAULT_AUTO_DEPLOY_SCENARIO_IDS`). It does **not** depend on `.env` unless you set **`AUTO_DEPLOY_SCENARIOS`** to override or **`AUTO_DEPLOY_SCENARIOS=0`** to turn it off.
+
+If you still see **`parsed_ids=[]`** in **`[elastic-launch-demo] startup:`**, you have an env var forcing empty (e.g. `AUTO_DEPLOY_SCENARIOS=0` or a stray empty assignment in **`EnvironmentFile=`**).
+
+If **`DEMO_*`** fails under **`User=www-data`**, fix **`EnvironmentFile=`** / permissions — that is separate from the hard-coded auto-deploy list.
+
+---
+
 ## Journal shows only `uvicorn.error`, not AUTO_DEPLOY / deploy lines
 
 **Cause:** Uvicorn’s logging defaults can leave the root logger at WARNING, so app loggers (e.g. `nova7`, `elastic_config.deployer`) never reach journald.
@@ -18,7 +28,7 @@
 sudo journalctl -u elastic-launch-demo.service -n 80 --no-pager
 ```
 
-You should see `AUTO_DEPLOY_SCENARIOS enabled: …` or the message that the variable is unset.
+You should see **`[elastic-launch-demo] startup:`** with **`parsed_ids=['gcp', 'financial', 'banking']`** (unless overridden) and **`AUTO_DEPLOY starting thread for: …`**.
 
 ---
 

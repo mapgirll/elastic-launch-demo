@@ -9,10 +9,12 @@ from typing import Any
 from dotenv import load_dotenv
 
 # Repo-root .env (not only cwd). Systemd/Uvicorn often start with a cwd where a
-# bare load_dotenv() would miss ./.env — breaks AUTO_DEPLOY_SCENARIOS etc.
+# bare load_dotenv() would miss ./.env.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Order: project .env, then service user's ~/.env, then cwd. override=False: first file wins per key.
 load_dotenv(_PROJECT_ROOT / ".env")
-load_dotenv()  # optional: cwd .env for local dev; does not override existing keys
+load_dotenv(Path.home() / ".env")
+load_dotenv()  # cwd fallback for local dev
 
 # ── Environment Configuration ──────────────────────────────────────────────
 OTLP_ENDPOINT = os.getenv("OTLP_ENDPOINT", "http://otel-collector:4318")
@@ -49,14 +51,23 @@ DEMO_ELASTIC_URL = os.getenv("DEMO_ELASTIC_URL", "").strip().rstrip("/")
 DEMO_OTLP_URL = os.getenv("DEMO_OTLP_URL", "").strip().rstrip("/")
 
 # ── Auto-deploy on startup (systemd / uvicorn restart) ───────────────────────
-# Comma-separated scenario_id values. Each runs a full Elastic deploy + telemetry
-# instance, sequentially (avoids API races). Example: gcp,financial,banking
-# Set to empty or "0" to disable.
+# Hard-coded default for the standard multi-vertical demo host. Each id runs a
+# full Elastic deploy + telemetry instance, sequentially.
+# Override: set AUTO_DEPLOY_SCENARIOS=space,gaming (comma-separated scenario_id).
+# Disable: AUTO_DEPLOY_SCENARIOS=0  (or false / none / off / no).
+# Alias env: AUTO_DEPLOY_SCENARIO_IDS (same semantics when AUTO_DEPLOY_SCENARIOS unset).
+_DEFAULT_AUTO_DEPLOY_SCENARIO_IDS: tuple[str, ...] = ("gcp", "financial", "banking")
+
 _auto_raw = os.getenv("AUTO_DEPLOY_SCENARIOS", "").strip()
+if not _auto_raw:
+    _auto_raw = os.getenv("AUTO_DEPLOY_SCENARIO_IDS", "").strip()
+_auto_raw = _auto_raw.lstrip("\ufeff")
 if _auto_raw.lower() in ("0", "false", "none", "off", "no"):
     AUTO_DEPLOY_SCENARIO_IDS: list[str] = []
-else:
+elif _auto_raw:
     AUTO_DEPLOY_SCENARIO_IDS = [x.strip() for x in _auto_raw.split(",") if x.strip()]
+else:
+    AUTO_DEPLOY_SCENARIO_IDS = list(_DEFAULT_AUTO_DEPLOY_SCENARIO_IDS)
 
 # ── Active Scenario ───────────────────────────────────────────────────────
 ACTIVE_SCENARIO = os.getenv("ACTIVE_SCENARIO", "space")

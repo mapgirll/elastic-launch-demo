@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -19,6 +20,7 @@ from app.config import (
     CREDENTIALS_LOCKED, DEMO_ELASTIC_API_KEY, DEMO_ELASTIC_URL,
     DEMO_KIBANA_URL, DEMO_OTLP_URL,
     MISSION_ID, MISSION_NAME, NAMESPACE, SERVICES,
+    _PROJECT_ROOT,
 )
 
 logging.basicConfig(
@@ -38,13 +40,22 @@ def _ensure_app_logs_visible() -> None:
     """
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    if not root.handlers:
-        h = logging.StreamHandler()
+    # Always attach a stderr handler: uvicorn may leave root.handlers non-empty but ineffective.
+    has_stderr = any(
+        getattr(h, "stream", None) is sys.stderr for h in root.handlers
+    )
+    if not has_stderr:
+        h = logging.StreamHandler(sys.stderr)
         h.setLevel(logging.INFO)
         h.setFormatter(
             logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
         )
         root.addHandler(h)
+
+
+def _startup_stderr(msg: str) -> None:
+    """Always visible in ``journalctl`` (bypasses logging config)."""
+    print(f"[elastic-launch-demo] {msg}", file=sys.stderr, flush=True)
 
 # ── Multi-tenancy singletons ──────────────────────────────────────────────────
 from app.registry import InstanceRegistry
@@ -219,6 +230,17 @@ async def lifespan(app: FastAPI):
     """On startup: restore active deployments from SQLite.  On shutdown: stop all."""
     _ensure_app_logs_visible()
 
+    _env_ad = os.environ.get("AUTO_DEPLOY_SCENARIOS", "")
+    _env_alias = os.environ.get("AUTO_DEPLOY_SCENARIO_IDS", "")
+    _proj_env = _PROJECT_ROOT / ".env"
+    _startup_stderr(
+        f"startup: project_root={_PROJECT_ROOT} "
+        f"project_.env_exists={_proj_env.is_file()} "
+        f"AUTO_DEPLOY_SCENARIOS={_env_ad!r} "
+        f"AUTO_DEPLOY_SCENARIO_IDS_env={_env_alias!r} "
+        f"parsed_ids={AUTO_DEPLOY_SCENARIO_IDS!r}"
+    )
+
     # Restore previously active deployments
     for rec in store.get_all_active():
         inst = _restore_deployment_record(dict(rec))
@@ -239,6 +261,9 @@ async def lifespan(app: FastAPI):
             )
 
     if AUTO_DEPLOY_SCENARIO_IDS:
+        _startup_stderr(
+            f"AUTO_DEPLOY starting thread for: {', '.join(AUTO_DEPLOY_SCENARIO_IDS)}"
+        )
         logger.info(
             "AUTO_DEPLOY_SCENARIOS enabled: %s (sequential background deploy)",
             ", ".join(AUTO_DEPLOY_SCENARIO_IDS),
@@ -249,11 +274,13 @@ async def lifespan(app: FastAPI):
             name="auto-deploy-scenarios",
         ).start()
     else:
+        _startup_stderr(
+            "AUTO_DEPLOY disabled (AUTO_DEPLOY_SCENARIO_IDS empty). "
+            "Default is gcp, financial, banking unless AUTO_DEPLOY_SCENARIOS=0 in env."
+        )
         logger.info(
-            "AUTO_DEPLOY_SCENARIOS is unset or empty — skipping startup multi-deploy. "
-            "Set environment variable AUTO_DEPLOY_SCENARIOS=gcp,financial,banking "
-            "(comma-separated scenario_id values), then restart the service. "
-            "Loaded from systemd EnvironmentFile, unit Environment=, or a .env in WorkingDirectory."
+            "AUTO_DEPLOY disabled — AUTO_DEPLOY_SCENARIOS=0 (or equivalent). "
+            "Omit that variable to use the built-in default list."
         )
 
     yield

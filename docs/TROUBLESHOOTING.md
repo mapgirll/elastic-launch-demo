@@ -1,5 +1,27 @@
 # Troubleshooting
 
+## systemd: `Unknown key 'StartLimitIntervalSec' in section [Service]`
+
+**Cause:** On some systemd versions, `StartLimitIntervalSec` and `StartLimitBurst` are **`[Unit]`** settings, not `[Service]`.
+
+**Fix:** Move those lines into the `[Unit]` block above `[Service]`, then `sudo systemctl daemon-reload`.
+
+---
+
+## Journal shows only `uvicorn.error`, not AUTO_DEPLOY / deploy lines
+
+**Cause:** Uvicorn’s logging defaults can leave the root logger at WARNING, so app loggers (e.g. `nova7`, `elastic_config.deployer`) never reach journald.
+
+**Fix:** The app calls `_ensure_app_logs_visible()` at startup (lifespan) to raise the root level and attach a stderr handler if needed. After upgrading to a build that includes that change, restart the service and check:
+
+```bash
+sudo journalctl -u elastic-launch-demo.service -n 80 --no-pager
+```
+
+You should see `AUTO_DEPLOY_SCENARIOS enabled: …` or the message that the variable is unset.
+
+---
+
 ## Kibana alert rules and `system-connector-.workflows`
 
 ### `Object type ".workflows" is not registered` (rule editor)

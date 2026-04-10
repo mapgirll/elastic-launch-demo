@@ -30,6 +30,22 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("nova7")
 
+
+def _ensure_app_logs_visible() -> None:
+    """Uvicorn replaces logging config; root often stays WARNING so ``nova7`` INFO never hits journald.
+
+    Call from lifespan so restore / AUTO_DEPLOY / deployer logs show in ``journalctl -u …``.
+    """
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    if not root.handlers:
+        h = logging.StreamHandler()
+        h.setLevel(logging.INFO)
+        h.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+        root.addHandler(h)
+
 # ── Multi-tenancy singletons ──────────────────────────────────────────────────
 from app.registry import InstanceRegistry
 from app.store import ChaosStore, DeploymentStore
@@ -201,6 +217,8 @@ def _ensure_instance(deployment_id: Optional[str] = None):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """On startup: restore active deployments from SQLite.  On shutdown: stop all."""
+    _ensure_app_logs_visible()
+
     # Restore previously active deployments
     for rec in store.get_all_active():
         inst = _restore_deployment_record(dict(rec))
